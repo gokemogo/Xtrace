@@ -1,0 +1,129 @@
+# =========================
+# 基础镜像阶段（ARM64）
+# =========================
+FROM node:20.19.5-alpine AS base
+
+# 安装系统依赖
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache \
+      libcrypto3 \
+      libssl3 \
+      libc6-compat \
+      busybox \
+      ssl_client \
+      openssl \
+      openssl-dev
+
+# 安装 pnpm
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN npm config set registry https://registry.npmmirror.com/ \
+    && npm install -g pnpm@9.5.0 \
+    && pnpm config set registry https://registry.npmmirror.com/
+
+# =========================
+# 构建阶段
+# =========================
+FROM base AS deps
+
+# 代理 & 跳过 puppeteer
+ENV HTTP_PROXY=http://192.168.10.181:7890
+ENV HTTPS_PROXY=http://192.168.10.181:7890
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
+WORKDIR /app
+
+COPY . .
+
+# ⚠️ 关键修改点：ARM64 musl 版 SWC
+RUN npm install @next/swc-linux-arm64-musl --no-save
+
+# 安装依赖
+RUN pnpm install --frozen-lockfile
+
+# Prisma
+RUN cd packages/shared && npx prisma generate
+
+# Build 环境变量
+ENV DOCKER_BUILD=1
+ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV NEXT_TELEMETRY_DISABLED=1
+
+ARG NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
+ARG NEXT_PUBLIC_DEMO_PROJECT_ID
+ARG NEXT_PUBLIC_SIGN_UP_DISABLED
+ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY
+ARG NEXT_PUBLIC_POSTHOG_KEY
+ARG NEXT_PUBLIC_POSTHOG_HOST
+ARG NEXT_PUBLIC_CRISP_WEBSITE_ID
+ARG LANFUSE_WEB_MIGRATION_DISABLED
+
+# 构建
+RUN pnpm build
+
+# =========================
+# 生产阶段（ARM64）
+# =========================
+FROM base AS production
+
+# 清理代理
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
+# 运行环境变量
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DOCKER_BUILD=0
+ENV NEXT_MANUAL_SIG_HANDLE=true
+
+ENV PORT=5000
+ENV WORKER_PORT=5001
+
+WORKDIR /app
+
+# 非 root 用户
+RUN addgroup -g 1001 -S nodejs \
+    && adduser -S nextjs -u 1001
+
+# 基础配置
+COPY --from=deps --chown=nextjs:nodejs /app/package.json ./
+COPY --from=deps --chown=nextjs:nodejs /app/pnpm-lock.yaml ./
+COPY --from=deps --chown=nextjs:nodejs /app/pnpm-workspace.yaml ./
+COPY --from=deps --chown=nextjs:nodejs /app/turbo.json ./
+
+# Web（Next.js standalone）
+COPY --from=deps --chown=nextjs:nodejs /app/web/package.json ./web/package.json
+COPY --from=deps --chown=nextjs:nodejs /app/web/next.config.mjs ./web/next.config.mjs
+COPY --from=deps --chown=nextjs:nodejs /app/web/.next/standalone ./
+COPY --from=deps --chown=nextjs:nodejs /app/web/.next/static ./web/.next/static
+COPY --from=deps --chown=nextjs:nodejs /app/web/public ./web/public
+
+# Worker
+COPY --from=deps --chown=nextjs:nodejs /app/worker/package.json ./worker/package.json
+COPY --from=deps --chown=nextjs:nodejs /app/worker/dist ./worker/dist
+COPY --from=deps --chown=nextjs:nodejs /app/worker/node_modules ./worker/node_modules
+
+# Shared
+COPY --from=deps --chown=nextjs:nodejs /app/packages/shared/dist ./packages/shared/dist
+COPY --from=deps --chown=nextjs:nodejs /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=deps --chown=nextjs:nodejs /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY --from=deps --chown=nextjs:nodejs /app/packages/shared/prisma ./packages/shared/prisma
+
+# EE
+COPY --from=deps --chown=nextjs:nodejs /app/ee/dist ./ee/dist
+COPY --from=deps --chown=nextjs:nodejs /app/ee/package.json ./ee/package.json
+COPY --from=deps --chown=nextjs:nodejs /app/ee/node_modules ./ee/node_modules
+
+# Config packages
+COPY --from=deps --chown=nextjs:nodejs /app/packages/config-eslint ./packages/config-eslint
+COPY --from=deps --chown=nextjs:nodejs /app/packages/config-typescript ./packages/config-typescript
+
+# Root node_modules
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
+
+USER nextjs
+
+EXPOSE 5000 5001
+
+CMD ["tail", "-f", "/dev/null"]

@@ -1,0 +1,105 @@
+services:
+  deeptrace-kingbase:
+    container_name: deeptrace-kingbase
+    image: kingbase_v009r001c010b0004_single_x86:v1
+    environment:
+    - "TZ=Asia/Shanghai"                # 改成国内时区
+    - "DB_USER=system"              # 初始用户
+    - "DB_PASSWORD=Deeptrace@2025"   # 初始密码
+    - "DB_MODE=pg"                   # 数据库模式oracle/pg/mysql
+    - "NEED_START=yes"                  # yes(默认 启动数据库)/ no（不启动数据库）
+    - "ENABLE_CI=yes"                   # yes(默认 大小写不敏感)/no 大小写敏感
+    privileged: true
+    ports:
+      - "54321:54321"
+    volumes:
+      - kingbase_data:/home/kingbase/userdata
+      - ./kingbase-entrypoint.sh:/home/kingbase/docker-entrypoint.sh
+      - ./kingbase_init.sql:/docker-entrypoint-initdb.d/kingbase_init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: '/home/kingbase/install/kingbase/bin/ksql -Umytestname -d test -p54321 -c "SELECT get_license_validdays();"'
+      interval: 5s
+      timeout: 10s
+      retries: 40
+
+
+  deeptrace-kredix:
+    container_name: deeptrace-kredix
+    image: kredix:v9 
+    ports:
+      - "6397:6397"
+    volumes:
+      - kredix_data:/opt/KRX/V9/data
+    environment:
+      - KREDIX_HOME=/opt/KRX/V9
+    restart: unless-stopped
+    command: ["/opt/KRX/V9/server_start.sh"]
+
+
+  deeptrace-app:
+    container_name: deeptrace-app
+    image: compass/deeptrace:1.0.0
+    ports:
+      - "5000:5000"  # web 前端
+      - "5001:5001"  # worker 后端
+    environment:
+      # 数据库配置 - 指向 Kingbase
+      - DATABASE_URL=postgresql://system:Deeptrace%402025@deeptrace-kingbase:54321/dev
+      - DIRECT_URL=postgresql://system:Deeptrace%402025@deeptrace-kingbase:54321/dev
+      
+      # Redis 配置 - 指向 KRedix
+      - REDIS_HOST=deeptrace-kredix
+      - REDIS_PORT=6397
+      - REDIS_AUTH=Deeptrace@2025
+      
+      # Next Auth 配置
+      - NEXTAUTH_URL=http://192.168.10.177:5000
+      - NEXTAUTH_SECRET=secret
+      
+      # Langfuse 配置
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      # 端口配置
+      - PORT=5000
+      - WORKER_PORT=5001
+      
+      # 安全配置
+      - SALT=salt
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
+      
+      # 可选配置（留空）
+      - EMAIL_FROM_ADDRESS=
+      - SMTP_CONNECTION_URL=
+      - S3_ENDPOINT=
+      - S3_ACCESS_KEY_ID=
+      - S3_SECRET_ACCESS_KEY=
+      - S3_BUCKET_NAME=
+      - S3_REGION=
+
+      # Kingbase 特定配置
+      - DB_TYPE=kingbase
+      - DB_COMPATIBLE_MODE=postgresql
+    depends_on:
+      deeptrace-kingbase:
+        condition: service_started
+      deeptrace-kredix:
+        condition: service_started
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo '等待数据库完全启动...' &&
+        sleep 15 &&
+        node worker/dist/index.js &
+        node web/server.js
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  kingbase_data:
+  kredix_data:

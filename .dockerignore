@@ -1,0 +1,17 @@
+Dockerfile
+Dockerfile.arm
+.dockerignore
+node_modules
+npm-debug.log
+README.md
+**/.next
+.git
+**/node_modules
+test.js
+python-test
+*.tar
+docker.sh
+restart.sh
+docs/
+.next/
+prisma/

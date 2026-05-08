@@ -1,0 +1,266 @@
+LANGFUZE CODEBASE ANALYSIS FOR CLAUDE.md
+
+## 1. Project Structure & Architecture
+
+### Overall Architecture
+- **Version**: 2.65.1 (production-ready v2, v3 in development)
+- **Type**: Next.js 14 monorepo for LLM observability platform
+- **Database**: PostgreSQL with Prisma ORM
+- **State**: v2 production, v3 worker under development
+
+### Current v2 Architecture
+- Web service: Next.js 14 with App Router + tRPC API
+- Client SDKs: Python and JavaScript
+- Database: PostgreSQL + Redis for caching
+- Public ingestion API for SDK data
+- React UI with shadcn/ui components
+
+### Emerging v3 Architecture
+- Worker service: Express.js with BullMQ for async processing
+- ClickHouse for analytics (planned)
+- Separation of web and worker services
+
+## 2. Monorepo Structure
+
+```
+langfuse/
+├── web/                    # Main Next.js application (API + UI)
+├── worker/                 # Background processing service (experimental)
+├── packages/
+│   ├── shared/             # Shared utilities, DB models, auth
+│   ├── config-eslint/      # ESLint configurations
+│   └── config-typescript/  # TypeScript configurations
+├── ee/                    # Enterprise edition features
+└── scripts/               # Build and development scripts
+```
+
+### Key Packages
+
+**web/** - Main application
+- Next.js 14 with App Router
+- tRPC API endpoints
+- React UI with shadcn/ui components
+- Public ingestion API
+- NextAuth.js authentication
+
+**worker/** - Background processing (experimental)
+- Express.js server
+- BullMQ for task queue
+- Not recommended for production in v2.x
+
+**packages/shared/** - Shared functionality
+- Prisma schema and database models
+- Authentication utilities
+- Email services
+- Storage services (S3)
+- Common types and utilities
+
+## 3. Development Setup & Commands
+
+### Prerequisites
+- Node.js 20
+- pnpm v9.5.0
+- Docker (for database)
+
+### Quick Start
+```bash
+# Setup development environment
+pnpm run infra:dev:up      # Start database
+cp .env.dev.example .env   # Create env file
+pnpm install               # Install dependencies
+pnpm --filter=shared run db:migrate  # Run migrations
+pnpm --filter=shared run db:seed:examples  # Seed data
+pnpm run dev               # Start development server
+```
+
+### Key Development Commands
+```bash
+pnpm run dx                # Full dev setup (deps, DB reset, seed, start)
+pnpm run dx-f              # Force reset setup
+pnpm run nuke              # Clean build artifacts
+pnpm run build             # Build all packages
+pnpm run test              # Run tests
+pnpm run test:e2e          # Run E2E tests
+pnpm run lint              # Lint code
+```
+
+## 4. Database Architecture
+
+### Core Technologies
+- **PostgreSQL**: Primary database
+- **Prisma ORM**: Database access and migrations
+- **Kysely**: Type-safe SQL queries
+- **Redis**: Caching and sessions
+
+### Key Data Models
+- **Users & Auth**: NextAuth.js integration
+- **Projects**: Multi-tenant organization
+- **Traces**: Top-level execution tracking
+- **Observations**: Spans, generations, events
+- **Scores**: Evaluations and feedback
+- **Prompts**: Managed prompt templates
+- **Datasets**: Testing datasets
+
+### Database Management
+- Migrations via Prisma
+- Schema in `packages/shared/prisma/schema.prisma`
+- Reset with `pnpm --filter=shared run db:reset`
+
+## 5. API Structure
+
+### Authentication & Authorization
+- **NextAuth.js** for authentication
+- **Project-based access control**
+- **Procedure types**:
+  - `publicProcedure`: No auth required
+  - `protectedProcedure`: User must be logged in
+  - `protectedProjectProcedure`: User must be project member
+
+### Key APIs
+**Public Ingestion API** (`/public/api/ingestion`):
+- Handles trace data from SDKs
+- Validates and stores observations
+- Processes tokens and model matching
+
+**Internal APIs** (tRPC):
+- Project management
+- User authentication
+- Dashboard data
+- Prompt management
+- Dataset operations
+
+### API Versioning
+- v2: Current production (single database)
+- v3: Planned (worker separation + ClickHouse)
+
+## 6. Key Dependencies
+
+### Core Technologies
+- Next.js 14 (React framework)
+- tRPC (type-safe RPC)
+- Prisma (ORM)
+- PostgreSQL (database)
+- Redis (cache/sessions)
+- NextAuth.js (authentication)
+- Tailwind CSS + shadcn/ui (styling)
+
+### Specialized Libraries
+- LangChain (LLM integration)
+- Anthropic/OpenAI SDKs
+- Sentry (error tracking)
+- PostHog (analytics)
+- BullMQ (queue management - worker)
+
+## 7. Environment Variables
+
+### Required
+```bash
+DATABASE_URL=postgresql://user:pass@localhost:5432/postgres
+DIRECT_URL=postgresql://user:pass@localhost:5432/postgres
+NEXTAUTH_SECRET=your-secret-here
+NEXTAUTH_URL=http://localhost:3000
+SALT=your-salt-for-api-key-encryption
+```
+
+### Optional
+```bash
+LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=false
+TELEMETRY_ENABLED=true
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+EMAIL_FROM_ADDRESS=noreply@example.com
+S3_ENDPOINT=  # For file storage
+```
+
+## 8. Development Workflow
+
+### Code Quality
+- ESLint + Prettier for formatting
+- TypeScript strict mode
+- Conventional commits (feat:, fix:, chore:)
+
+### Testing
+- Jest: API unit tests
+- Playwright: E2E UI tests
+- Vitest: Worker unit tests
+
+### Git Workflow
+- Conventional commits
+- Squash-merge for clean history
+- CLA required for contributions
+
+### Theming
+- CSS variables (shadcn/ui conventions)
+- HSL values for consistency
+- Automatic dark mode with next-themes
+
+## 9. Key Architecture Patterns
+
+### Service Interaction
+1. Client SDKs → Public Ingestion API → PostgreSQL
+2. Web UI → tRPC API → PostgreSQL
+3. Worker Service (v3) → Redis Queue → PostgreSQL + ClickHouse
+
+### Data Flow
+- Traces: Top-level execution units
+- Observations: Spans, generations, events
+- Scores: Evaluations and feedback
+- Public/Private: Project-based access
+
+### Multi-tenancy
+- Project-based isolation
+- User project memberships
+- Project-level access control
+- Admin users with global access
+
+## 10. Common Tasks
+
+### Adding Features
+1. Update Prisma schema
+2. Run migrations
+3. Add tRPC routers
+4. Add UI components
+5. Update env schema
+
+### Debugging
+- Database: Check Prisma queries
+- API: tRPC logging + Sentry
+- UI: React DevTools + browser console
+- Performance: Sentry profiling
+
+### Testing
+- `pnpm run test` - API tests
+- `pnpm run test:e2e` - UI tests
+- Use staging for end-to-end
+
+## 11. Important Notes
+
+### v3 Status
+- Worker service in active development
+- Not production-ready in v2.x
+- Will introduce ClickHouse for analytics
+
+### Security
+- API keys encrypted with SALT
+- Project-based access control
+- HTTPS enforcement in production
+- CSP headers for security
+
+### Performance
+- PostgreSQL for transactional data
+- Redis for caching
+- S3 for file storage
+- ClickHouse planned for analytics
+
+## 12. Configuration Files
+- turbo.json: Build pipeline
+- pnpm-workspace.yaml: Workspace definitions
+- next.config.mjs: Next.js config
+- tailwind.config.ts: Tailwind CSS
+- prisma/schema.prisma: Database schema
+
+## 13. External Resources
+- Official Documentation: https://langfuse.com/docs
+- GitHub Discussions: https://github.com/orgs/langfuse/discussions
+- Discord Community: https://langfuse.com/discord
+- SDK Repositories: https://github.com/langfuse/langfuse-python, https://github.com/langfuse/langfuse-js

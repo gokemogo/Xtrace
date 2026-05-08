@@ -1,0 +1,1759 @@
+import { randomUUID } from "crypto";
+
+import { ObservationLevel, ObservationTypeDomain } from "../../domain/observations";
+
+import { LangfuseOtelSpanAttributes } from "./attributes";
+import { ObservationTypeMapperRegistry } from "./ObservationTypeMapper";
+import { isValidDateString, flattenJsonToPathArrays } from "./utils";
+
+// Type definitions for internal processor state
+interface TraceState {
+  hasFullTrace: boolean;
+  shallowEventIds: string[];
+}
+
+export interface OtelIngestionProcessorConfig {
+  projectId: string;
+  publicKey?: string;
+}
+
+interface CreateTraceEventParams {
+  traceId: string;
+  startTimeISO: string;
+  attributes: Record<string, unknown>;
+  resourceAttributes: Record<string, unknown>;
+  resourceAttributeMetadata: Record<string, unknown>;
+  scopeSpan: any;
+  scopeAttributes: Record<string, unknown>;
+  isLangfuseSDKSpans: boolean;
+  isRootSpan: boolean;
+  hasTraceUpdates: boolean;
+  parentObservationId: string | null;
+  span: any;
+}
+
+interface CreateObservationEventParams {
+  span: any;
+  traceId: string;
+  parentObservationId: string | null;
+  attributes: Record<string, unknown>;
+  resourceAttributes: Record<string, unknown>;
+  resourceAttributeMetadata: Record<string, unknown>;
+  spanAttributeMetadata: Record<string, unknown>;
+  scopeSpan: any;
+  scopeAttributes: Record<string, unknown>;
+  isLangfuseSDKSpans: boolean;
+  startTimeISO: string;
+  endTimeISO: string;
+}
+
+export interface ResourceSpan {
+  resource?: {
+    attributes?: Array<{ key: string; value: any }>;
+  };
+  scopeSpans?: Array<{
+    scope?: {
+      name: string;
+      version?: string;
+      attributes?: Array<{ key: string; value: any }>;
+    };
+    spans?: Array<{
+      traceId: { data?: Buffer } | Buffer;
+      spanId: { data?: Buffer } | Buffer;
+      parentSpanId?: { data?: Buffer } | Buffer;
+      name: string;
+      kind: number;
+      startTimeUnixNano: number | { low: number; high: number };
+      endTimeUnixNano: number | { low: number; high: number };
+      attributes?: Array<{ key: string; value: any }>;
+      events?: any[];
+      status?: { code?: number; message?: string };
+    }>;
+  }>;
+}
+
+const observationTypeMapper = new ObservationTypeMapperRegistry();
+
+/**
+ * Processor class that encapsulates all logic for converting OpenTelemetry
+ * resource spans into Langfuse ingestion events.
+ *
+ * Manages trace deduplication internally and provides a clean interface
+ * for converting OTEL spans to Langfuse events.
+ */
+export class OtelIngestionProcessor {
+  private seenTraces: Set<string> = new Set();
+  private isInitialized = false;
+  private traceEventCounts = {
+    shallow: 0,
+    rootSpanClosed: 0,
+    traceUpdated: 0,
+  };
+  private readonly projectId: string;
+  private readonly publicKey?: string;
+
+  constructor(config: OtelIngestionProcessorConfig) {
+    this.projectId = config.projectId;
+    this.publicKey = config.publicKey;
+  }
+
+  /**
+   * Process resource spans and convert them to Langfuse ingestion events.
+   * Handles trace deduplication automatically using internal state.
+   * Initializes seen traces from Redis automatically on first call.
+   * Filters out shallow trace events if full trace events exist for the same traceId.
+   */
+  async processToIngestionEvents(
+    resourceSpans: any[] // 类型可暂时用 any
+  ): Promise<any[]> {
+    try {
+      // Input validation
+      if (!Array.isArray(resourceSpans) || resourceSpans.length === 0) {
+        return [];
+      }
+
+      // 核心转换：每个 ResourceSpan → 一组 ingestion events
+      const allEvents = resourceSpans.flatMap(resourceSpan => {
+        if (!resourceSpan) return [];
+        return this.processResourceSpan(resourceSpan);
+      });
+
+      // 如果不需要去重，直接返回 allEvents
+      return allEvents;
+    } catch (error) {
+      console.error("Error in OtelIngestionProcessor:", error);
+      return []; // 或 throw error，看你的需求
+    }
+  }
+
+  private processResourceSpan(resourceSpan: ResourceSpan): any[] {
+    const resourceAttributes = this.extractResourceAttributes(resourceSpan);
+    const events: any[] = [];
+
+    for (const scopeSpan of resourceSpan?.scopeSpans ?? []) {
+      const isLangfuseSDKSpans =
+        scopeSpan.scope?.name?.startsWith("langfuse-sdk") ?? false;
+      const scopeAttributes = this.extractScopeAttributes(scopeSpan);
+
+      for (const span of scopeSpan?.spans ?? []) {
+        const spanEvents = this.processSpan(
+          span,
+          scopeSpan,
+          resourceAttributes,
+          scopeAttributes,
+          isLangfuseSDKSpans
+        );
+        events.push(...spanEvents);
+      }
+    }
+
+    return events;
+  }
+
+  private processSpan(
+    span: any,
+    scopeSpan: any,
+    resourceAttributes: Record<string, unknown>,
+    scopeAttributes: Record<string, unknown>,
+    isLangfuseSDKSpans: boolean
+  ): any[] {
+    const events: any[] = [];
+    const attributes = this.extractSpanAttributes(span);
+
+    const traceId = this.parseId(span.traceId?.data ?? span.traceId);
+    const parentObservationId = span?.parentSpanId
+      ? this.parseId(span.parentSpanId?.data ?? span.parentSpanId)
+      : null;
+
+    const spanAttributeMetadata = this.extractMetadata(
+      attributes,
+      "observation"
+    );
+    const resourceAttributeMetadata = this.extractMetadata(
+      resourceAttributes,
+      "trace"
+    );
+    const startTimeISO = OtelIngestionProcessor.convertNanoTimestampToISO(
+      span.startTimeUnixNano
+    );
+    const endTimeISO = OtelIngestionProcessor.convertNanoTimestampToISO(
+      span.endTimeUnixNano
+    );
+
+    const isRootSpan =
+      !parentObservationId ||
+      String(attributes[LangfuseOtelSpanAttributes.AS_ROOT]) === "true";
+
+    const hasTraceUpdates = this.hasTraceUpdates(attributes);
+
+    // Handle trace creation logic with internal seen traces management
+    if (isRootSpan || hasTraceUpdates || !this.seenTraces.has(traceId)) {
+      const traceEvent = this.createTraceEvent({
+        traceId,
+        startTimeISO,
+        attributes,
+        resourceAttributes,
+        resourceAttributeMetadata,
+        scopeSpan,
+        scopeAttributes,
+        isLangfuseSDKSpans,
+        isRootSpan,
+        hasTraceUpdates,
+        parentObservationId,
+        span,
+      });
+      events.push(traceEvent);
+
+      // Update internal seen traces cache
+      this.seenTraces.add(traceId);
+    }
+
+    // Create observation event
+    const observationEvent = this.createObservationEvent({
+      span,
+      traceId,
+      parentObservationId,
+      attributes,
+      resourceAttributes,
+      resourceAttributeMetadata,
+      spanAttributeMetadata,
+      scopeSpan,
+      scopeAttributes,
+      isLangfuseSDKSpans,
+      startTimeISO,
+      endTimeISO,
+    });
+    events.push(observationEvent);
+
+    return events;
+  }
+
+  private createTraceEvent(params: CreateTraceEventParams): any {
+    const {
+      traceId,
+      startTimeISO,
+      attributes,
+      resourceAttributes,
+      resourceAttributeMetadata,
+      scopeSpan,
+      scopeAttributes,
+      isLangfuseSDKSpans,
+      isRootSpan,
+      hasTraceUpdates,
+      span,
+    } = params;
+
+    // Create shallow trace for new traces without root span or trace updates
+    let trace: any["body"] = {
+      id: traceId,
+      timestamp: startTimeISO,
+      environment: this.extractEnvironment(attributes, resourceAttributes),
+    };
+
+    const instrumentationScopeName = scopeSpan?.scope?.name as string;
+
+    // Create full trace for root spans or spans with trace updates
+    if (isRootSpan) {
+      // Extract input/output and get filtered attributes
+      const { input, output, filteredAttributes } = this.extractInputAndOutput({
+        events: span?.events ?? [],
+        attributes,
+        domain: "trace",
+        instrumentationScopeName,
+      });
+      trace = {
+        ...trace,
+        name:
+          (attributes[LangfuseOtelSpanAttributes.TRACE_NAME] as string) ??
+          this.extractName(span.name, attributes),
+        metadata: {
+          ...resourceAttributeMetadata,
+          ...this.extractMetadata(attributes, "trace"),
+          ...this.extractMetadata(attributes, "observation"),
+          ...(isLangfuseSDKSpans ? {} : { attributes: filteredAttributes }),
+          resourceAttributes,
+          scope: {
+            ...(scopeSpan.scope || {}),
+            attributes: scopeAttributes,
+          },
+        } as Record<string, string | Record<string, string | number>>,
+        version:
+          (attributes?.[LangfuseOtelSpanAttributes.VERSION] as string) ??
+          resourceAttributes?.["service.version"] ??
+          null,
+        release:
+          (attributes?.[LangfuseOtelSpanAttributes.RELEASE] as string) ??
+          resourceAttributes?.[LangfuseOtelSpanAttributes.RELEASE] ??
+          null,
+        userId: this.extractUserId(attributes),
+        sessionId: this.extractSessionId(attributes),
+        public: this.extractPublic(attributes),
+        tags: this.extractTags(attributes),
+        environment: this.extractEnvironment(attributes, resourceAttributes),
+        input,
+        output,
+      };
+    }
+
+    if (hasTraceUpdates && !isRootSpan) {
+      trace = {
+        ...trace,
+        name: attributes[LangfuseOtelSpanAttributes.TRACE_NAME] as string,
+        metadata: {
+          ...resourceAttributeMetadata,
+          ...this.extractMetadata(attributes, "trace"),
+          // removed to not remove trace metadata->attributes through subsequent observations
+          // ...(isLangfuseSDKSpans
+          //   ? {}
+          //   : { attributes: spanAttributesInMetadata }),
+          resourceAttributes,
+          scope: {
+            ...(scopeSpan.scope || {}),
+            attributes: scopeAttributes,
+          },
+        } as Record<string, string | Record<string, string | number>>,
+        version:
+          (attributes?.[LangfuseOtelSpanAttributes.VERSION] as string) ??
+          resourceAttributes?.["service.version"] ??
+          null,
+        release:
+          (attributes?.[LangfuseOtelSpanAttributes.RELEASE] as string) ??
+          resourceAttributes?.[LangfuseOtelSpanAttributes.RELEASE] ??
+          null,
+        userId: this.extractUserId(attributes),
+        sessionId: this.extractSessionId(attributes),
+        public: this.extractPublic(attributes),
+        tags: this.extractTags(attributes),
+        environment: this.extractEnvironment(attributes, resourceAttributes),
+        input: attributes[LangfuseOtelSpanAttributes.TRACE_INPUT],
+        output: attributes[LangfuseOtelSpanAttributes.TRACE_OUTPUT],
+      };
+    }
+
+    if (isRootSpan) {
+      this.traceEventCounts.rootSpanClosed += 1;
+    } else if (hasTraceUpdates) {
+      this.traceEventCounts.traceUpdated += 1;
+    } else {
+      this.traceEventCounts.shallow += 1;
+    }
+    return {
+      id: randomUUID(),
+      type: "trace-create",
+      timestamp: new Date(startTimeISO).toISOString(),
+      body: trace,
+    };
+  }
+
+  private extractPublic(
+    attributes?: Record<string, unknown>
+  ): boolean | undefined {
+    const value =
+      attributes?.[LangfuseOtelSpanAttributes.TRACE_PUBLIC] ??
+      attributes?.["langfuse.public"];
+
+    if (value == null) return;
+    return value === true || value === "true";
+  }
+
+  private createObservationEvent(params: CreateObservationEventParams): any {
+    const {
+      span,
+      traceId,
+      parentObservationId,
+      attributes,
+      resourceAttributes,
+      resourceAttributeMetadata,
+      spanAttributeMetadata,
+      scopeSpan,
+      scopeAttributes,
+      isLangfuseSDKSpans,
+      startTimeISO,
+      endTimeISO,
+    } = params;
+
+    const instrumentationScopeName = scopeSpan?.scope?.name;
+
+    // Extract input/output and get filtered attributes
+    const { input, output, filteredAttributes } = this.extractInputAndOutput({
+      events: span?.events ?? [],
+      attributes,
+      instrumentationScopeName,
+    });
+
+    const observation = {
+      id: this.parseId(span.spanId?.data ?? span.spanId),
+      traceId,
+      parentObservationId,
+      name: this.extractName(span.name, attributes),
+      startTime: startTimeISO,
+      endTime: endTimeISO,
+      environment: this.extractEnvironment(attributes, resourceAttributes),
+      completionStartTime: this.extractCompletionStartTime(
+        attributes,
+        startTimeISO
+      ),
+      metadata: {
+        ...resourceAttributeMetadata,
+        ...spanAttributeMetadata,
+        ...(isLangfuseSDKSpans ? {} : { attributes: filteredAttributes }),
+        resourceAttributes,
+        scope: { ...scopeSpan.scope, attributes: scopeAttributes },
+      },
+      level:
+        attributes[LangfuseOtelSpanAttributes.OBSERVATION_LEVEL] ??
+        (span.status?.code === 2
+          ? ObservationLevel.ERROR
+          : ObservationLevel.DEFAULT),
+      statusMessage:
+        attributes[LangfuseOtelSpanAttributes.OBSERVATION_STATUS_MESSAGE] ??
+        span.status?.message ??
+        null,
+      version:
+        attributes[LangfuseOtelSpanAttributes.VERSION] ??
+        resourceAttributes?.["service.version"] ??
+        null,
+      modelParameters: this.extractModelParameters(
+        attributes,
+        instrumentationScopeName
+      ) as any,
+      model: this.extractModelName(attributes),
+      promptName:
+        attributes?.[LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME] ??
+        attributes["langfuse.prompt.name"] ??
+        this.parseLangfusePromptFromAISDK(attributes)?.name ??
+        null,
+      promptVersion:
+        attributes?.[LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_VERSION] ??
+        attributes["langfuse.prompt.version"] ??
+        this.parseLangfusePromptFromAISDK(attributes)?.version ??
+        null,
+      usageDetails: this.extractUsageDetails(
+        attributes,
+        instrumentationScopeName
+      ),
+      costDetails: this.extractCostDetails(attributes, isLangfuseSDKSpans),
+      input,
+      output,
+    };
+
+    const mappedObservationType = observationTypeMapper.mapToObservationType(
+      attributes,
+      resourceAttributes,
+      scopeSpan?.scope
+    );
+    const observationType =
+      mappedObservationType && typeof mappedObservationType === "string"
+        ? mappedObservationType.toLowerCase()
+        : undefined;
+
+    const isKnownObservationType =
+      observationType &&
+      ObservationTypeDomain.safeParse(observationType.toUpperCase()).success;
+
+    const getIngestionEventType = (): string => {
+      if (isKnownObservationType) {
+        return `${observationType}-create`;
+      }
+      return "span-create";
+    };
+
+    return {
+      id: randomUUID(),
+      type: getIngestionEventType(),
+      timestamp: new Date().toISOString(),
+      body: observation,
+    } as unknown as any;
+  }
+
+  private hasTraceUpdates(attributes: Record<string, unknown>): boolean {
+    const hasExactMatchingAttributeName = [
+      LangfuseOtelSpanAttributes.TRACE_NAME,
+      LangfuseOtelSpanAttributes.TRACE_INPUT,
+      LangfuseOtelSpanAttributes.TRACE_OUTPUT,
+      LangfuseOtelSpanAttributes.TRACE_METADATA,
+      LangfuseOtelSpanAttributes.TRACE_USER_ID,
+      LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
+      LangfuseOtelSpanAttributes.TRACE_PUBLIC,
+      LangfuseOtelSpanAttributes.TRACE_TAGS,
+      LangfuseOtelSpanAttributes.TRACE_COMPAT_USER_ID,
+      LangfuseOtelSpanAttributes.TRACE_COMPAT_SESSION_ID,
+      // OpenAI and Langchain integrations
+      `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_user_id`,
+      `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_session_id`,
+      `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_tags`,
+      `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_session_id`,
+      `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_user_id`,
+      `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_tags`,
+      // Vercel AI SDK
+      `ai.telemetry.metadata.sessionId`,
+      `ai.telemetry.metadata.userId`,
+      `ai.telemetry.metadata.tags`,
+      // LlamaIndex
+      `tag.tags`,
+    ].some(traceAttribute => Boolean(attributes[traceAttribute]));
+
+    const attributeKeys = Object.keys(attributes);
+    const hasTraceMetadataKey = attributeKeys.some(key =>
+      key.startsWith(LangfuseOtelSpanAttributes.TRACE_METADATA)
+    );
+
+    return hasExactMatchingAttributeName || hasTraceMetadataKey;
+  }
+
+  private extractResourceAttributes(
+    resourceSpan: any
+  ): Record<string, unknown> {
+    return (
+      resourceSpan?.resource?.attributes?.reduce((acc: any, attr: any) => {
+        acc[attr.key] = this.convertValueToPlainJavascript(attr.value);
+        return acc;
+      }, {}) ?? {}
+    );
+  }
+
+  private extractScopeAttributes(scopeSpan: any): Record<string, unknown> {
+    return (
+      scopeSpan?.scope?.attributes?.reduce((acc: any, attr: any) => {
+        acc[attr.key] = this.convertValueToPlainJavascript(attr.value);
+        return acc;
+      }, {}) ?? {}
+    );
+  }
+
+  private extractSpanAttributes(span: any): Record<string, unknown> {
+    return (
+      span?.attributes?.reduce((acc: any, attr: any) => {
+        acc[attr.key] = this.convertValueToPlainJavascript(attr.value);
+        return acc;
+      }, {}) ?? {}
+    );
+  }
+
+  private convertValueToPlainJavascript(value: Record<string, any>): any {
+    if (value.stringValue !== undefined) {
+      return value.stringValue;
+    }
+    if (value.doubleValue !== undefined) {
+      return value.doubleValue;
+    }
+    if (value.boolValue !== undefined) {
+      return value.boolValue;
+    }
+    if (value.arrayValue && value.arrayValue.values !== undefined) {
+      return value.arrayValue.values.map((v: any) =>
+        this.convertValueToPlainJavascript(v)
+      );
+    }
+    if (value.intValue !== undefined) {
+      // intValue can be a string (protobuf with longs: String), a plain number,
+      // or a Long object with high/low properties
+      if (typeof value.intValue === "string") {
+        const parsed = Number(value.intValue);
+        if (!Number.isNaN(parsed)) {
+          return parsed;
+        }
+        return value.intValue;
+      }
+      if (typeof value.intValue === "number") {
+        return value.intValue;
+      }
+      if (value.intValue.high === 0) {
+        return value.intValue.low;
+      }
+      if (value.intValue.high === -1 && value.intValue.low === -1) {
+        return -1;
+      }
+      if (value.intValue.high !== 0) {
+        return value.intValue.high * Math.pow(2, 32) + value.intValue.low;
+      }
+    }
+    return JSON.stringify(value);
+  }
+
+  private convertKeyPathToNestedObject(
+    input: Record<string, unknown>,
+    prefix: string
+  ): any {
+    if (input[prefix]) {
+      return input[prefix];
+    }
+
+    const keys = Object.keys(input).map(key => key.replace(`${prefix}.`, ""));
+    const useArray = keys.some(key => key.match(/^\d+\./));
+
+    // Helper function to set a value at a nested path
+    const setNestedValue = (obj: any, path: string[], value: unknown): void => {
+      let current = obj;
+      for (let i = 0; i < path.length - 1; i++) {
+        const key = path[i];
+        if (!(key in current)) {
+          // Check if next key is a number to decide if we need an array or object
+          current[key] = /^\d+$/.test(path[i + 1]) ? [] : {};
+        }
+        current = current[key];
+      }
+      current[path[path.length - 1]] = value;
+    };
+
+    if (useArray) {
+      const result: any[] = [];
+      for (const key of keys) {
+        const pathParts = key.split(".");
+        const index = parseInt(pathParts[0], 10);
+        if (!result[index]) {
+          result[index] = {};
+        }
+        if (pathParts.length === 2) {
+          // Simple case: 0.content -> result[0].content
+          result[index][pathParts[1]] = input[`${prefix}.${key}`];
+        } else {
+          // Nested case: 0.message.content -> result[0].message.content
+          setNestedValue(
+            result[index],
+            pathParts.slice(1),
+            input[`${prefix}.${key}`]
+          );
+        }
+      }
+      return result;
+    } else {
+      const result: Record<string, unknown> = {};
+      for (const key of keys) {
+        const pathParts = key.split(".");
+        if (pathParts.length === 1) {
+          result[key] = input[`${prefix}.${key}`];
+        } else {
+          setNestedValue(result, pathParts, input[`${prefix}.${key}`]);
+        }
+      }
+      return result;
+    }
+  }
+
+  private extractInputAndOutput(params: {
+    events: any[];
+    attributes: Record<string, unknown>;
+    instrumentationScopeName: string;
+    domain?: "trace" | "observation";
+  }): { input: any; output: any; filteredAttributes: Record<string, unknown> } {
+    const { instrumentationScopeName, events, attributes, domain } = params;
+
+    let input = null;
+    let output = null;
+    // Create a shallow copy of attributes to filter out used keys
+    const rawFilteredAttributes = { ...attributes };
+
+    // Pre-delete all potential input/output attribute keys to avoid duplicates
+    // This ensures that if multiple frameworks' attributes are present, they're all filtered
+    const potentialInputOutputKeys = [
+      // Langfuse SDK
+      LangfuseOtelSpanAttributes.TRACE_INPUT,
+      LangfuseOtelSpanAttributes.TRACE_OUTPUT,
+      LangfuseOtelSpanAttributes.OBSERVATION_INPUT,
+      LangfuseOtelSpanAttributes.OBSERVATION_OUTPUT,
+      // Vercel AI SDK
+      "ai.prompt.messages",
+      "ai.prompt",
+      "ai.toolCall.args",
+      "ai.response.text",
+      "ai.result.text",
+      "ai.toolCall.result",
+      "ai.response.object",
+      "ai.result.object",
+      "ai.response.toolCalls",
+      "ai.result.toolCalls",
+      // Google Vertex AI
+      "gcp.vertex.agent.llm_request",
+      "gcp.vertex.agent.llm_response",
+      "gcp.vertex.agent.tool_call_args",
+      "gcp.vertex.agent.tool_response",
+      // Logfire
+      "prompt",
+      "all_messages_events",
+      "events",
+      // LiveKit
+      "lk.input_text",
+      "lk.function_tool.output",
+      "lk.response.text",
+      // MLFlow
+      "mlflow.spanInputs",
+      "mlflow.spanOutputs",
+      // TraceLoop
+      "traceloop.entity.input",
+      "traceloop.entity.output",
+      // SmolAgents
+      "input.value",
+      "output.value",
+      // Pydantic and Pipecat
+      "input",
+      "output",
+      // OpenTelemetry
+      "gen_ai.input.messages",
+      "gen_ai.output.messages",
+      "gen_ai.tool.call.arguments",
+      "gen_ai.tool.call.result",
+    ];
+
+    // Delete simple keys
+    potentialInputOutputKeys.forEach(key => {
+      delete rawFilteredAttributes[key];
+    });
+
+    // Delete gen_ai.prompt.*, gen_ai.completion.*, llm.input_messages.*, and llm.output_messages.* keys
+    Object.keys(attributes).forEach(key => {
+      if (
+        key.startsWith("gen_ai.prompt") ||
+        key.startsWith("gen_ai.completion") ||
+        key.startsWith("llm.input_messages") ||
+        key.startsWith("llm.output_messages")
+      ) {
+        delete rawFilteredAttributes[key];
+      }
+    });
+
+    // Stringify non-string values in filteredAttributes to maintain backward compatibility
+    // This matches the old spanAttributesInMetadata behavior
+    const filteredAttributes = Object.fromEntries(
+      Object.entries(rawFilteredAttributes).map(([key, value]) => [
+        key,
+        typeof value === "string" ? value : JSON.stringify(value),
+      ])
+    );
+
+    // Langfuse
+    input =
+      domain === "trace" && attributes[LangfuseOtelSpanAttributes.TRACE_INPUT]
+        ? attributes[LangfuseOtelSpanAttributes.TRACE_INPUT]
+        : attributes[LangfuseOtelSpanAttributes.OBSERVATION_INPUT];
+    output =
+      domain === "trace" && attributes[LangfuseOtelSpanAttributes.TRACE_OUTPUT]
+        ? attributes[LangfuseOtelSpanAttributes.TRACE_OUTPUT]
+        : attributes[LangfuseOtelSpanAttributes.OBSERVATION_OUTPUT];
+
+    if (input != null || output != null) {
+      return { input, output, filteredAttributes };
+    }
+
+    // Vercel AI SDK
+    if (instrumentationScopeName === "ai") {
+      input =
+        "ai.prompt.messages" in attributes
+          ? attributes["ai.prompt.messages"]
+          : "ai.prompt" in attributes
+            ? attributes["ai.prompt"]
+            : "ai.toolCall.args" in attributes
+              ? attributes["ai.toolCall.args"]
+              : undefined;
+
+      if (
+        "ai.response.text" in attributes &&
+        "ai.response.toolCalls" in attributes
+      ) {
+        output = JSON.stringify({
+          role: "assistant",
+          content: attributes["ai.response.text"],
+          tool_calls: attributes["ai.response.toolCalls"],
+        });
+      } else {
+        output =
+          "ai.response.text" in attributes &&
+          Boolean(attributes["ai.response.text"])
+            ? attributes["ai.response.text"]
+            : "ai.result.text" in attributes // Legacy support for ai SDK versions < 4.0.0
+              ? attributes["ai.result.text"]
+              : "ai.toolCall.result" in attributes
+                ? attributes["ai.toolCall.result"]
+                : "ai.response.object" in attributes
+                  ? attributes["ai.response.object"]
+                  : "ai.result.object" in attributes // Legacy support for ai SDK versions < 4.0.0
+                    ? attributes["ai.result.object"]
+                    : "ai.response.toolCalls" in attributes
+                      ? attributes["ai.response.toolCalls"]
+                      : "ai.result.toolCalls" in attributes // Legacy support for ai SDK versions < 4.0.0
+                        ? attributes["ai.result.toolCalls"]
+                        : undefined;
+      }
+
+      return { input, output, filteredAttributes };
+    }
+
+    const inputEvents = events.filter(
+      (event: Record<string, unknown>) =>
+        event.name === "gen_ai.system.message" ||
+        event.name === "gen_ai.user.message" ||
+        event.name === "gen_ai.assistant.message" ||
+        event.name === "gen_ai.tool.message"
+    );
+
+    const outputEvents = events.filter(
+      (event: Record<string, unknown>) => event.name === "gen_ai.choice"
+    );
+
+    if (inputEvents.length > 0 || outputEvents.length > 0) {
+      const processedInput =
+        inputEvents.length > 0
+          ? inputEvents.map((event: any) => {
+              const eventAttributes =
+                event.attributes?.reduce((acc: any, attr: any) => {
+                  acc[attr.key] = this.convertValueToPlainJavascript(
+                    attr.value
+                  );
+                  return acc;
+                }, {}) ?? {};
+
+              return {
+                role: event.name.replace("gen_ai.", "").replace(".message", ""),
+                ...eventAttributes,
+              };
+            })
+          : null;
+
+      const processedOutput =
+        outputEvents.length > 0
+          ? outputEvents.map((event: any) => {
+              const eventAttributes =
+                event.attributes?.reduce((acc: any, attr: any) => {
+                  acc[attr.key] = this.convertValueToPlainJavascript(
+                    attr.value
+                  );
+                  return acc;
+                }, {}) ?? {};
+
+              return eventAttributes;
+            })
+          : null;
+
+      return {
+        input: processedInput,
+        output:
+          processedOutput && processedOutput.length === 1
+            ? processedOutput[0]
+            : processedOutput,
+        filteredAttributes, // No attribute keys used, events are used instead
+      };
+    }
+
+    // Legacy semantic kernel event definitions
+    input = events.find(
+      (event: Record<string, unknown>) => event.name === "gen_ai.content.prompt"
+    )?.attributes;
+
+    output = events.find(
+      (event: Record<string, unknown>) =>
+        event.name === "gen_ai.content.completion"
+    )?.attributes;
+
+    if (input || output) {
+      input =
+        input?.reduce((acc: any, attr: any) => {
+          acc[attr.key] = this.convertValueToPlainJavascript(attr.value);
+          return acc;
+        }, {}) ?? {};
+      output =
+        output?.reduce((acc: any, attr: any) => {
+          acc[attr.key] = this.convertValueToPlainJavascript(attr.value);
+          return acc;
+        }, {}) ?? {};
+
+      const { input: eventInput } = this.extractInputAndOutput({
+        events: [],
+        attributes: input,
+        instrumentationScopeName,
+      });
+      const { output: eventOutput } = this.extractInputAndOutput({
+        events: [],
+        attributes: output,
+        instrumentationScopeName,
+      });
+      return {
+        input: eventInput || input,
+        output: eventOutput || output,
+        filteredAttributes, // No attribute keys used, events are used instead
+      };
+    }
+
+    // Google Vertex AI Agent-Developer-Kit (ADK)
+    input = attributes["gcp.vertex.agent.llm_request"];
+    output = attributes["gcp.vertex.agent.llm_response"];
+    // GCP Vertex Agent Tool call input and output
+    // see: https://github.com/google/adk-python/blob/9dce06f9b00259ec42241df4f6638955e783a9d1/src/google/adk/telemetry/tracing.py#L142
+    // Google sets llm_request and llm_response to {} when setting tool_call_args and tool_response
+    if (input === "{}" || !input) {
+      input = attributes["gcp.vertex.agent.tool_call_args"];
+    }
+    if (output === "{}" || !output) {
+      output = attributes["gcp.vertex.agent.tool_response"];
+    }
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // Logfire uses `prompt` and `all_messages_events` property on spans
+    input = attributes["prompt"];
+    output = attributes["all_messages_events"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // LiveKit
+    input = attributes["lk.input_text"];
+    output =
+      attributes["lk.function_tool.output"] || attributes["lk.response.text"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // Logfire uses single `events` array for GenAI events
+    const eventsArray = attributes["events"];
+    if (typeof eventsArray === "string" || Array.isArray(eventsArray)) {
+      let events = eventsArray as any[];
+      if (typeof eventsArray === "string") {
+        try {
+          events = JSON.parse(eventsArray);
+        } catch (e) {
+          events = [];
+        }
+      }
+
+      const choiceEvent = events.find(
+        event => event["event.name"] === "gen_ai.choice"
+      );
+      const inputEvents = events.filter(
+        event => event["event.name"] !== "gen_ai.choice"
+      );
+
+      if (choiceEvent || inputEvents.length > 0) {
+        return {
+          input: inputEvents.length > 0 ? inputEvents : null,
+          output: choiceEvent || null,
+          filteredAttributes,
+        };
+      }
+    }
+
+    // MLFlow sets mlflow.spanInputs and mlflow.spanOutputs
+    input = attributes["mlflow.spanInputs"];
+    output = attributes["mlflow.spanOutputs"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // TraceLoop sets traceloop.entity.input and traceloop.entity.output
+    input = attributes["traceloop.entity.input"];
+    output = attributes["traceloop.entity.output"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // SmolAgents sets input.value and output.value
+    input = attributes["input.value"];
+    output = attributes["output.value"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // Pydantic and Pipecat uses input and output
+    input = attributes["input"];
+    output = attributes["output"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // Pydantic-AI uses tool_arguments and tool_response for tool call input/output
+    input = attributes["tool_arguments"];
+    output = attributes["tool_response"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // TraceLoop uses attributes property
+    const inputAttributes = Object.keys(attributes).filter(key =>
+      key.startsWith("gen_ai.prompt")
+    );
+    const outputAttributes = Object.keys(attributes).filter(key =>
+      key.startsWith("gen_ai.completion")
+    );
+    if (inputAttributes.length > 0 || outputAttributes.length > 0) {
+      input = inputAttributes.reduce((acc: any, key) => {
+        acc[key] = attributes[key];
+        return acc;
+      }, {});
+      output = outputAttributes.reduce((acc: any, key) => {
+        acc[key] = attributes[key];
+        return acc;
+      }, {});
+      return {
+        input: this.convertKeyPathToNestedObject(input, "gen_ai.prompt"),
+        output: this.convertKeyPathToNestedObject(output, "gen_ai.completion"),
+        filteredAttributes,
+      };
+    }
+
+    // OpenInference llm.input_messages and llm.output_messages (used by Agno, BeeAI, etc.)
+    const llmInputAttributes = Object.keys(attributes).filter(key =>
+      key.startsWith("llm.input_messages")
+    );
+    const llmOutputAttributes = Object.keys(attributes).filter(key =>
+      key.startsWith("llm.output_messages")
+    );
+    if (llmInputAttributes.length > 0 || llmOutputAttributes.length > 0) {
+      const llmInput = llmInputAttributes.reduce((acc: any, key) => {
+        acc[key] = attributes[key];
+        return acc;
+      }, {});
+      const llmOutput = llmOutputAttributes.reduce((acc: any, key) => {
+        acc[key] = attributes[key];
+        return acc;
+      }, {});
+      return {
+        input: this.convertKeyPathToNestedObject(
+          llmInput,
+          "llm.input_messages"
+        ),
+        output: this.convertKeyPathToNestedObject(
+          llmOutput,
+          "llm.output_messages"
+        ),
+        filteredAttributes,
+      };
+    }
+
+    // OpenTelemetry messages (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
+    input = attributes["gen_ai.input.messages"];
+    output = attributes["gen_ai.output.messages"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    // OpenTelemetry tools (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
+    input = attributes["gen_ai.tool.call.arguments"];
+    output = attributes["gen_ai.tool.call.result"];
+    if (input || output) {
+      return { input, output, filteredAttributes };
+    }
+
+    return { input: null, output: null, filteredAttributes };
+  }
+
+  private extractEnvironment(
+    attributes: Record<string, unknown>,
+    resourceAttributes: Record<string, unknown>
+  ): string {
+    const environmentAttributeKeys = [
+      LangfuseOtelSpanAttributes.ENVIRONMENT,
+      "deployment.environment.name",
+      "deployment.environment",
+    ];
+
+    for (const key of environmentAttributeKeys) {
+      if (attributes[key]) {
+        return attributes[key] as string;
+      }
+      if (resourceAttributes[key]) {
+        return resourceAttributes[key] as string;
+      }
+    }
+
+    return "default";
+  }
+
+  private extractName(
+    spanName: string,
+    attributes: Record<string, unknown>
+  ): string {
+    // GenAI tool name (standard OTel GenAI attribute)
+    if ("gen_ai.tool.name" in attributes && attributes["gen_ai.tool.name"]) {
+      return typeof attributes["gen_ai.tool.name"] === "string"
+        ? (attributes["gen_ai.tool.name"] as string)
+        : JSON.stringify(attributes["gen_ai.tool.name"]);
+    }
+
+    // Logfire message for pydantic AI
+    const nameKeys = ["logfire.msg"];
+    for (const key of nameKeys) {
+      if (attributes[key]) {
+        return typeof attributes[key] === "string"
+          ? (attributes[key] as string)
+          : JSON.stringify(attributes[key]);
+      }
+    }
+
+    // Vercel AI SDK
+    if ("ai.toolCall.name" in attributes) {
+      return attributes["ai.toolCall.name"] as string;
+    }
+
+    const functionIdAttribute = "ai.telemetry.functionId";
+    const operationIdAttribute = "ai.operationId";
+
+    if (operationIdAttribute in attributes) {
+      const prefix = attributes[functionIdAttribute]
+        ? attributes[functionIdAttribute] + ":"
+        : "";
+
+      return prefix + attributes[operationIdAttribute];
+    }
+
+    return spanName;
+  }
+
+  private extractMetadata(
+    attributes: Record<string, unknown>,
+    domain: "trace" | "observation"
+  ): Record<string, unknown> {
+    let topLevelMetadata: Record<string, unknown> = {};
+
+    const metadataKeyPrefix =
+      domain === "observation"
+        ? LangfuseOtelSpanAttributes.OBSERVATION_METADATA
+        : LangfuseOtelSpanAttributes.TRACE_METADATA;
+
+    const langfuseMetadataAttribute =
+      attributes[metadataKeyPrefix] || attributes["langfuse.metadata"];
+
+    if (langfuseMetadataAttribute) {
+      try {
+        if (typeof langfuseMetadataAttribute === "string") {
+          topLevelMetadata = JSON.parse(langfuseMetadataAttribute as string);
+        } else if (typeof langfuseMetadataAttribute === "object") {
+          topLevelMetadata = langfuseMetadataAttribute as Record<
+            string,
+            unknown
+          >;
+        }
+      } catch (e) {
+        // Continue with nested metadata extraction
+      }
+    }
+
+    const langfuseMetadata: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(attributes)) {
+      for (const prefix of [
+        metadataKeyPrefix,
+        "langfuse.metadata",
+        "ai.telemetry.metadata",
+      ]) {
+        if (
+          key.startsWith(`${prefix}.`) &&
+          // Filter out the Vercel AI SDK trace attribute keys
+          ![
+            "ai.telemetry.metadata.userId",
+            "ai.telemetry.metadata.sessionId",
+            "ai.telemetry.metadata.tags",
+            "ai.telemetry.metadata.langfusePrompt",
+          ].includes(key)
+        ) {
+          const newKey = key.replace(`${prefix}.`, "");
+          langfuseMetadata[newKey] = value;
+        }
+      }
+    }
+
+    // Vercel AI SDK
+    const tools =
+      "ai.prompt.tools" in attributes
+        ? attributes["ai.prompt.tools"]
+        : undefined;
+
+    if (tools) {
+      langfuseMetadata["tools"] = tools;
+    }
+
+    return {
+      ...topLevelMetadata,
+      ...langfuseMetadata,
+    };
+  }
+
+  private extractUserId(
+    attributes: Record<string, unknown>
+  ): string | undefined {
+    const userIdKeys = [
+      "langfuse.user.id",
+      "user.id",
+      `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_user_id`,
+      `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_user_id`,
+      `ai.telemetry.metadata.userId`,
+    ];
+
+    for (const key of userIdKeys) {
+      if (attributes[key]) {
+        return typeof attributes[key] === "string"
+          ? (attributes[key] as string)
+          : JSON.stringify(attributes[key]);
+      }
+    }
+  }
+
+  private extractSessionId(
+    attributes: Record<string, unknown>
+  ): string | undefined {
+    const userIdKeys = [
+      "langfuse.session.id",
+      "session.id",
+      "gen_ai.conversation.id",
+      `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_session_id`,
+      `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_session_id`,
+      `ai.telemetry.metadata.sessionId`,
+    ];
+
+    for (const key of userIdKeys) {
+      if (attributes[key]) {
+        return typeof attributes[key] === "string"
+          ? (attributes[key] as string)
+          : JSON.stringify(attributes[key]);
+      }
+    }
+  }
+
+  private extractModelParameters(
+    attributes: Record<string, unknown>,
+    instrumentationScopeName: string
+  ): Record<string, unknown> {
+    if (attributes[LangfuseOtelSpanAttributes.OBSERVATION_MODEL_PARAMETERS]) {
+      try {
+        return this.sanitizeModelParams(
+          JSON.parse(
+            attributes[
+              LangfuseOtelSpanAttributes.OBSERVATION_MODEL_PARAMETERS
+            ] as string
+          )
+        );
+      } catch {
+        // Fallthrough
+      }
+    }
+
+    // Vercel AI SDK
+    if (instrumentationScopeName === "ai") {
+      return {
+        maxSteps:
+          "ai.settings.maxSteps" in attributes
+            ? attributes["ai.settings.maxSteps"]?.toString() ?? null
+            : null,
+        toolChoice:
+          "ai.prompt.toolChoice" in attributes
+            ? attributes["ai.prompt.toolChoice"]?.toString() ?? null
+            : null,
+        maxTokens:
+          "gen_ai.request.max_tokens" in attributes
+            ? attributes["gen_ai.request.max_tokens"]?.toString() ?? null
+            : null,
+        finishReason:
+          "gen_ai.response.finish_reasons" in attributes
+            ? attributes["gen_ai.response.finish_reasons"]?.toString() ?? null
+            : "gen_ai.finishReason" in attributes //  Legacy support for ai SDK versions < 4.0.0
+              ? attributes["gen_ai.finishReason"]?.toString() ?? null
+              : null,
+        system:
+          "gen_ai.system" in attributes
+            ? attributes["gen_ai.system"]?.toString() ?? null
+            : "ai.model.provider" in attributes
+              ? attributes["ai.model.provider"]?.toString() ?? null
+              : null,
+        maxRetries:
+          "ai.settings.maxRetries" in attributes
+            ? attributes["ai.settings.maxRetries"]?.toString() ?? null
+            : null,
+        mode:
+          "ai.settings.mode" in attributes
+            ? attributes["ai.settings.mode"]?.toString() ?? null
+            : null,
+        temperature:
+          "gen_ai.request.temperature" in attributes
+            ? attributes["gen_ai.request.temperature"]?.toString() ?? null
+            : null,
+      };
+    }
+
+    if (attributes["llm.invocation_parameters"]) {
+      try {
+        return this.sanitizeModelParams(
+          JSON.parse(attributes["llm.invocation_parameters"] as string)
+        );
+      } catch (e) {
+        // fallthrough
+      }
+    }
+
+    if (attributes["model_config"]) {
+      try {
+        return this.sanitizeModelParams(
+          JSON.parse(attributes["model_config"] as string)
+        );
+      } catch (e) {
+        // fallthrough
+      }
+    }
+
+    const modelParameters = Object.keys(attributes).filter(key =>
+      key.startsWith("gen_ai.request.")
+    );
+
+    return this.sanitizeModelParams(
+      modelParameters.reduce((acc: any, key) => {
+        const modelParamKey = key.replace("gen_ai.request.", "");
+        if (modelParamKey !== "model") {
+          acc[modelParamKey] = attributes[key];
+        }
+        return acc;
+      }, {})
+    );
+  }
+
+  private sanitizeModelParams<T>(params: T): Record<string, string> | T {
+    // Model params in Langfuse must be key value pairs where value is string
+    if (typeof params === "object" && params != null)
+      return Object.fromEntries(
+        Object.entries(params).map(e => [
+          e[0],
+          ["string", "number"].includes(typeof e[1])
+            ? e[1]
+            : JSON.stringify(e[1]),
+        ])
+      );
+
+    return params;
+  }
+
+  private extractModelName(
+    attributes: Record<string, unknown>
+  ): string | undefined {
+    const modelNameKeys = [
+      LangfuseOtelSpanAttributes.OBSERVATION_MODEL,
+      "gen_ai.response.model",
+      "ai.model.id",
+      "gen_ai.request.model",
+      "llm.response.model",
+      "llm.model_name",
+      "model",
+    ];
+    for (const key of modelNameKeys) {
+      if (attributes[key]) {
+        return typeof attributes[key] === "string"
+          ? (attributes[key] as string)
+          : JSON.stringify(attributes[key]);
+      }
+    }
+  }
+
+  private extractUsageDetails(
+    attributes: Record<string, unknown>,
+    instrumentationScopeName: string
+  ): Record<string, unknown> {
+    if (attributes[LangfuseOtelSpanAttributes.OBSERVATION_USAGE_DETAILS]) {
+      try {
+        return JSON.parse(
+          attributes[
+            LangfuseOtelSpanAttributes.OBSERVATION_USAGE_DETAILS
+          ] as string
+        );
+      } catch {
+        // Fallthrough
+      }
+    }
+
+    if (instrumentationScopeName === "ai") {
+      try {
+        const usageDetails: Record<string, number | undefined> = {
+          input:
+            "gen_ai.usage.prompt_tokens" in attributes // Backward compat, input_tokens used in latest ai SDK versions
+              ? parseInt(
+                  attributes["gen_ai.usage.prompt_tokens"]?.toString() ?? "0"
+                )
+              : "gen_ai.usage.input_tokens" in attributes
+                ? parseInt(
+                    attributes["gen_ai.usage.input_tokens"]?.toString() ?? "0"
+                  )
+                : undefined,
+
+          output:
+            "gen_ai.usage.completion_tokens" in attributes // Backward compat, output_tokens used in latest ai SDK versions
+              ? parseInt(
+                  attributes["gen_ai.usage.completion_tokens"]?.toString() ??
+                    "0"
+                )
+              : "gen_ai.usage.output_tokens" in attributes
+                ? parseInt(
+                    attributes["gen_ai.usage.output_tokens"]?.toString() ?? "0"
+                  )
+                : undefined,
+          total:
+            "ai.usage.tokens" in attributes
+              ? parseInt(attributes["ai.usage.tokens"]?.toString() ?? "0")
+              : undefined,
+        };
+
+        const providerMetadata = attributes["ai.response.providerMetadata"];
+
+        // Try reading token details from ai.usage
+        if (
+          ["ai.usage.cachedInputTokens", "ai.usage.reasoningTokens"].some(k =>
+            Object.keys(attributes).includes(k)
+          )
+        ) {
+          if ("ai.usage.cachedInputTokens" in attributes) {
+            const value = attributes["ai.usage.cachedInputTokens"] as string;
+            const parsed = JSON.parse(value);
+
+            usageDetails["input_cached_tokens"] =
+              typeof parsed === "number" ? parsed : JSON.parse(value).intValue;
+          }
+          if ("ai.usage.reasoningTokens" in attributes) {
+            const value = attributes["ai.usage.reasoningTokens"] as string;
+            const parsed = JSON.parse(value);
+
+            usageDetails["output_reasoning_tokens"] =
+              typeof parsed === "number" ? parsed : JSON.parse(value).intValue;
+          }
+        } else if (providerMetadata) {
+          // Fall back to providerMetadata
+          const parsed = JSON.parse(providerMetadata as string);
+
+          if ("openai" in parsed) {
+            const openaiMetadata = parsed["openai"] as Record<string, number>;
+
+            usageDetails["input_cached_tokens"] =
+              openaiMetadata["cachedPromptTokens"];
+            usageDetails["accepted_prediction_tokens"] =
+              openaiMetadata["acceptedPredictionTokens"];
+            usageDetails["rejected_prediction_tokens"] =
+              openaiMetadata["rejectedPredictionTokens"];
+            usageDetails["output_reasoning_tokens"] =
+              openaiMetadata["reasoningTokens"];
+          }
+          // "ai.response.providerMetadata": "{\"anthropic\":{\"cacheCreationInputTokens\":0,\"cacheReadInputTokens\":0}}"
+          if ("anthropic" in parsed) {
+            const openaiMetadata = parsed["anthropic"] as Record<
+              string,
+              number
+            >;
+
+            usageDetails["input_cache_creation"] =
+              openaiMetadata["cacheCreationInputTokens"];
+            usageDetails["input_cache_read"] =
+              openaiMetadata["cacheReadInputTokens"];
+          }
+          // Bedrock provider metadata extraction
+          // "ai.response.providerMetadata": "{\"bedrock\":{\"usage\":{\"cacheReadInputTokens\":4482,\"cacheWriteInputTokens\":0,\"cacheCreationInputTokens\":0}}}"
+          if ("bedrock" in parsed) {
+            const bedrockMetadata = parsed["bedrock"] as Record<string, any>;
+
+            if (bedrockMetadata["usage"]) {
+              const usage = bedrockMetadata["usage"] as Record<string, number>;
+
+              if (usage["cacheReadInputTokens"] !== undefined) {
+                usageDetails["input_cache_read"] =
+                  usage["cacheReadInputTokens"];
+              }
+              if (usage["cacheWriteInputTokens"] !== undefined) {
+                usageDetails["input_cache_write"] =
+                  usage["cacheWriteInputTokens"];
+              }
+              if (usage["cacheCreationInputTokens"] !== undefined) {
+                usageDetails["input_cache_creation"] =
+                  usage["cacheCreationInputTokens"];
+              }
+            }
+          }
+        }
+
+        return usageDetails;
+      } catch {
+        // Fallthrough
+      }
+    }
+
+    const usageDetails = Object.keys(attributes).filter(
+      key =>
+        (key.startsWith("gen_ai.usage.") && key !== "gen_ai.usage.cost") ||
+        key.startsWith("llm.token_count")
+    );
+
+    const usageDetailKeyMapping: Record<string, string> = {
+      prompt_tokens: "input",
+      completion_tokens: "output",
+      total_tokens: "total",
+      input_tokens: "input",
+      output_tokens: "output",
+      prompt: "input",
+      completion: "output",
+    };
+
+    return usageDetails.reduce((acc: any, key) => {
+      const usageDetailKey = key
+        .replace("gen_ai.usage.", "")
+        .replace("llm.token_count.", "");
+      const mappedUsageDetailKey =
+        usageDetailKeyMapping[usageDetailKey] ?? usageDetailKey;
+      const value = Number(attributes[key]);
+      if (!Number.isNaN(value)) {
+        acc[mappedUsageDetailKey] = value;
+      }
+      return acc;
+    }, {});
+  }
+
+  private extractCostDetails(
+    attributes: Record<string, unknown>,
+    isLangfuseSDKSpan: boolean
+  ): Record<string, unknown> {
+    if (isLangfuseSDKSpan) {
+      try {
+        return JSON.parse(
+          attributes[
+            LangfuseOtelSpanAttributes.OBSERVATION_COST_DETAILS
+          ] as string
+        );
+      } catch {
+        // Fallthrough
+      }
+    }
+
+    if (attributes["gen_ai.usage.cost"]) {
+      return { total: attributes["gen_ai.usage.cost"] };
+    }
+    return {};
+  }
+
+  private extractCompletionStartTime(
+    attributes: Record<string, unknown>,
+    startTimeISO?: string
+  ): string | null {
+    try {
+      const value = attributes[
+        LangfuseOtelSpanAttributes.OBSERVATION_COMPLETION_START_TIME
+      ] as any;
+
+      if (isValidDateString(value)) return value;
+
+      // Older SDKs have double stringified timestamps that need JSON parsing
+      // "\"2025-10-01T08:45:26.112648Z\""
+      const parsed = JSON.parse(value);
+      if (isValidDateString(parsed)) return parsed;
+    } catch {
+      // Fallthrough
+    }
+
+    // Vercel AI SDK
+    try {
+      const msToFirstChunk =
+        attributes["ai.response.msToFirstChunk"] ??
+        attributes["ai.stream.msToFirstChunk"];
+      if (msToFirstChunk && startTimeISO) {
+        const msToFirstChunkNumber = Math.ceil(Number(msToFirstChunk));
+
+        const startTimeUnix = new Date(startTimeISO).getTime();
+
+        return new Date(startTimeUnix + msToFirstChunkNumber).toISOString();
+      }
+    } catch {
+      // Fallthrough
+    }
+
+    return null;
+  }
+
+  private extractTags(attributes: Record<string, unknown>): string[] {
+    const tagsValue =
+      attributes[LangfuseOtelSpanAttributes.TRACE_TAGS] ||
+      attributes["langfuse.tags"] ||
+      attributes[
+        `${LangfuseOtelSpanAttributes.OBSERVATION_METADATA}.langfuse_tags`
+      ] ||
+      attributes[
+        `${LangfuseOtelSpanAttributes.TRACE_METADATA}.langfuse_tags`
+      ] ||
+      attributes["ai.telemetry.metadata.tags"] ||
+      attributes["tag.tags"];
+
+    if (tagsValue === undefined || tagsValue === null) {
+      return [];
+    }
+
+    if (Array.isArray(tagsValue)) {
+      return tagsValue.map(tag => String(tag));
+    }
+
+    if (typeof tagsValue === "string" && tagsValue.trim().startsWith("[")) {
+      try {
+        const parsedTags = JSON.parse(tagsValue);
+        if (Array.isArray(parsedTags)) {
+          return parsedTags.map(tag => String(tag));
+        }
+      } catch (e) {
+        // Continue with other methods
+      }
+    }
+
+    if (typeof tagsValue === "string" && tagsValue.includes(",")) {
+      return tagsValue.split(",").map(tag => tag.trim());
+    }
+
+    if (typeof tagsValue === "string") {
+      return [tagsValue];
+    }
+
+    return [];
+  }
+
+  /**
+   * Extracts experiment-related fields from span attributes.
+   * Returns undefined for fields that are not present.
+   */
+  private extractExperimentFields(attributes: Record<string, unknown>): {
+    experimentId?: string;
+    experimentName?: string;
+    experimentDescription?: string;
+    experimentDatasetId?: string;
+    experimentItemId?: string;
+    experimentItemRootSpanId?: string;
+    experimentItemExpectedOutput?: string;
+    experimentMetadataNames?: string[];
+    experimentMetadataValues?: Array<string | null | undefined>;
+    experimentItemMetadataNames?: string[];
+    experimentItemMetadataValues?: Array<string | null | undefined>;
+  } {
+    const experimentId = attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ID];
+    const experimentName =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_NAME];
+    const experimentDescription =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_DESCRIPTION];
+    const experimentDatasetId =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_DATASET_ID];
+    const experimentItemId =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_ID];
+    const experimentItemRootSpanId =
+      attributes[
+        LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_ROOT_OBSERVATION_ID
+      ];
+    const experimentItemExpectedOutput =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_EXPECTED_OUTPUT];
+
+    // Extract experiment metadata
+    const experimentMetadataStr =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_METADATA];
+    let experimentMetadata: Record<string, unknown> = {};
+    if (experimentMetadataStr && typeof experimentMetadataStr === "string") {
+      try {
+        experimentMetadata = JSON.parse(experimentMetadataStr);
+      } catch (e) {
+        // If parsing fails, treat as empty
+      }
+    }
+    const experimentMetadataFlattened =
+      flattenJsonToPathArrays(experimentMetadata);
+
+    // Extract experiment item metadata
+    const experimentItemMetadataStr =
+      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_METADATA];
+    let experimentItemMetadata: Record<string, unknown> = {};
+    if (
+      experimentItemMetadataStr &&
+      typeof experimentItemMetadataStr === "string"
+    ) {
+      try {
+        experimentItemMetadata = JSON.parse(experimentItemMetadataStr);
+      } catch (e) {
+        // If parsing fails, treat as empty
+      }
+    }
+    const experimentItemMetadataFlattened = flattenJsonToPathArrays(
+      experimentItemMetadata
+    );
+
+    return {
+      experimentId: experimentId ? String(experimentId) : undefined,
+      experimentName: experimentName ? String(experimentName) : undefined,
+      experimentDescription: experimentDescription
+        ? String(experimentDescription)
+        : undefined,
+      experimentDatasetId: experimentDatasetId
+        ? String(experimentDatasetId)
+        : undefined,
+      experimentItemId: experimentItemId ? String(experimentItemId) : undefined,
+      experimentItemRootSpanId: experimentItemRootSpanId
+        ? String(experimentItemRootSpanId)
+        : undefined,
+      experimentItemExpectedOutput: experimentItemExpectedOutput
+        ? String(experimentItemExpectedOutput)
+        : undefined,
+      experimentMetadataNames:
+        experimentMetadataFlattened.names.length > 0
+          ? experimentMetadataFlattened.names
+          : undefined,
+      experimentMetadataValues:
+        experimentMetadataFlattened.values.length > 0
+          ? experimentMetadataFlattened.values
+          : undefined,
+      experimentItemMetadataNames:
+        experimentItemMetadataFlattened.names.length > 0
+          ? experimentItemMetadataFlattened.names
+          : undefined,
+      experimentItemMetadataValues:
+        experimentItemMetadataFlattened.values.length > 0
+          ? experimentItemMetadataFlattened.values
+          : undefined,
+    };
+  }
+
+  private parseLangfusePromptFromAISDK(
+    attributes: Record<string, unknown>
+  ): { name: string; version: number } | undefined {
+    const aiSDKPrompt = attributes["ai.telemetry.metadata.langfusePrompt"];
+
+    if (!aiSDKPrompt) return;
+
+    try {
+      const parsed = JSON.parse(aiSDKPrompt as string);
+
+      return typeof parsed === "object" ? parsed : undefined;
+    } catch {
+      // Fallthrough
+    }
+  }
+
+  private parseId(data: any): string {
+    // JS SDK sends IDs already in hex strings
+    // Python SDK sends Int array
+    return typeof data === "string" ? data : Buffer.from(data).toString("hex");
+  }
+
+  /**
+   * Convert OpenTelemetry nano timestamp to ISO string.
+   * Handles various timestamp formats: string, number, or object with high/low bits.
+   */
+  public static convertNanoTimestampToISO(
+    timestamp:
+      | number
+      | string
+      | {
+          high: number;
+          low: number;
+        }
+  ): string {
+    try {
+      if (typeof timestamp === "string") {
+        return new Date(Number(BigInt(timestamp) / BigInt(1e6))).toISOString();
+      }
+      if (typeof timestamp === "number") {
+        return new Date(timestamp / 1e6).toISOString();
+      }
+
+      // Convert high and low to BigInt
+      const highBits = BigInt(timestamp.high) << BigInt(32);
+      const lowBits = BigInt(timestamp.low >>> 0);
+
+      // Combine high and low bits
+      const nanosBigInt = highBits | lowBits;
+
+      // Convert nanoseconds to milliseconds for JavaScript Date
+      const millisBigInt = nanosBigInt / BigInt(1000000);
+      return new Date(Number(millisBigInt)).toISOString();
+    } catch (e) {
+      throw e;
+    }
+  }
+}
