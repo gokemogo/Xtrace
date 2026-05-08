@@ -60,7 +60,7 @@
     "@remixicon/react": "^4.2.0",
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "@sentry/nextjs": "^8.13.0",
+    "@sentry/nextjs": "^10.52.0",
     "@sentry/node": "^8.13.0",
     "@sentry/profiling-node": "^8.13.0",
     "@sentry/types": "^8.13.0",
