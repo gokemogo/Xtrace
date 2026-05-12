@@ -27,8 +27,8 @@ RUN npm config set registry https://registry.npmmirror.com/ \
 FROM base AS deps
 
 # 代理 & 跳过 puppeteer
-ENV HTTP_PROXY=http://192.168.10.181:7890
-ENV HTTPS_PROXY=http://192.168.10.181:7890
+#ENV HTTP_PROXY=http://192.168.10.181:7890
+#ENV HTTPS_PROXY=http://192.168.10.181:7890
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 WORKDIR /app
