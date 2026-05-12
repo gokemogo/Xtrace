@@ -150,6 +150,12 @@ const sentryOptions = {
   //   'Configure Tunneling':
   //     - tunnelRoute
   tunnelRoute: "/api/monitoring-tunnel",
+
+  // Disable Sentry webpack plugins during Docker build to reduce memory usage
+  ...(process.env.DOCKER_BUILD === "1" && {
+    disableServerWebpackPlugin: true,
+    disableClientWebpackPlugin: true,
+  }),
 };
 
 export default withSentryConfig(nextConfig, sentryOptions);

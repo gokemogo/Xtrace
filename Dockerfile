@@ -15,9 +15,12 @@ RUN npm config set registry https://registry.npmmirror.com/ \
 # 构建阶段 - 安装依赖
 FROM base AS deps
 
-# 设置代理和环境变量跳过 puppeteer 下载
-ENV HTTP_PROXY=http://192.168.10.128:7890
-ENV HTTPS_PROXY=http://192.168.10.128:7890
+# 显式清空代理，防止宿主机代理环境变量泄漏到构建上下文
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV http_proxy=
+ENV https_proxy=
+ENV NO_PROXY=*
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 # 设置工作目录
@@ -29,21 +32,21 @@ COPY . .
 # 安装依赖（使用国内镜像源，跳过 puppeteer）
 # 这一层会被缓存，除非包管理文件发生变化
 # 修复 SWC 二进制问题 - 安装 musl 版本的 SWC
-RUN npm install @next/swc-linux-x64-musl --no-save
+RUN npm config delete proxy && npm config delete https-proxy && npm install @next/swc-linux-x64-musl --no-save
 RUN pnpm install --frozen-lockfile
 
 
 RUN cd packages/shared && npx prisma generate
 
 # 设置代理和环境变量
-ENV HTTP_PROXY=http://192.168.10.128:7890
-ENV HTTPS_PROXY=http://192.168.10.128:7890
-ENV PUPPETEER_SKIP_DOWNLOAD=true
+#ENV HTTP_PROXY=http://192.168.10.128:7890
+#ENV HTTPS_PROXY=http://192.168.10.128:7890
+#ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 # pass public variables in build step | web
-ENV DOCKER_BUILD 1
-ENV NEXT_MANUAL_SIG_HANDLE true
-ENV NEXT_TELEMETRY_DISABLED 1
+ENV DOCKER_BUILD=1
+ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV NEXT_TELEMETRY_DISABLED=1
 
 ARG NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
 ARG NEXT_PUBLIC_DEMO_PROJECT_ID
@@ -54,7 +57,14 @@ ARG NEXT_PUBLIC_POSTHOG_HOST
 ARG NEXT_PUBLIC_CRISP_WEBSITE_ID
 ARG LANFUSE_WEB_MIGRATION_DISABLED
 # 构建应用（deps 阶段已经安装了所有依赖）
-RUN pnpm build
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV GENERATE_SOURCEMAP=false
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV SENTRY_SUPPRESS_GLOBAL_ERROR_HANDLER_FILE_WARNING=1
+# Skip Sentry webpack plugin during Docker build to reduce memory usage
+ENV SENTRY_SKIP_AUTO_UPLOAD=true
+ENV SENTRY_DISABLE_SOURCEMAP_UPLOAD=true
+RUN pnpm turbo build --concurrency=1
 
 # 生产阶段
 FROM base AS production
@@ -65,10 +75,10 @@ ENV HTTPS_PROXY=
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 # 创建运行环境
-ENV NODE_ENV production
-ENV NEXT_TELEMETRY_DISABLED 1
-ENV DOCKER_BUILD 0
-ENV NEXT_MANUAL_SIG_HANDLE true
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DOCKER_BUILD=0
+ENV NEXT_MANUAL_SIG_HANDLE=true
 
 # 设置自定义端口环境变量
 ENV PORT=5000
