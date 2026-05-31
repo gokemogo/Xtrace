@@ -28,13 +28,6 @@ export const projectMembersRouter = createTRPCRouter({
       const memberships = await ctx.prisma.projectMembership.findMany({
         where: {
           projectId: input.projectId,
-          project: {
-            projectMembers: {
-              some: {
-                userId: ctx.session.user.id,
-              },
-            },
-          },
         },
         include: {
           user: {

@@ -8,6 +8,7 @@ import { paginationZod } from "@langfuse/shared";
 import {
   singleFilter,
   tableColumnsToSqlFilterAndPrefix,
+  getDbType,
 } from "@langfuse/shared";
 import { Prisma, type Score } from "@langfuse/shared/src/db";
 import { usersTableCols } from "@/src/server/api/definitions/usersTable";
@@ -31,13 +32,20 @@ export const userRouter = createTRPCRouter({
         "users",
       );
 
+      const dbType = getDbType();
       const totalUsers = (
         await ctx.prisma.$queryRaw<
           Array<{
             totalCount: bigint;
           }>
         >(
-          Prisma.sql`
+          dbType === "dm8"
+            ? Prisma.sql`
+      SELECT CAST(COUNT(DISTINCT t.user_id) AS BIGINT) AS "totalCount"
+      FROM traces t
+      WHERE t.project_id = ${input.projectId} ${filterCondition}
+    `
+            : Prisma.sql`
       SELECT COUNT(DISTINCT t.user_id)::bigint AS "totalCount"
       FROM traces t
       WHERE t.project_id = ${input.projectId} ${filterCondition}
@@ -47,7 +55,23 @@ export const userRouter = createTRPCRouter({
 
       // 修复第二个查询的拼接方式
       const users = await ctx.prisma.$queryRaw(
-        Prisma.sql`
+        dbType === "dm8"
+          ? Prisma.sql`
+    SELECT
+      t.user_id AS "userId",
+      CAST(COUNT(t.id) AS BIGINT) AS "totalTraces"
+    FROM
+      traces t
+    WHERE
+      t.user_id IS NOT NULL
+      AND t.project_id = ${input.projectId} ${filterCondition}
+    GROUP BY
+      t.user_id
+    ORDER BY
+      "totalTraces" DESC
+    OFFSET ${input.page * input.limit} ROWS FETCH NEXT ${input.limit} ROWS ONLY
+  `
+          : Prisma.sql`
     SELECT
       t.user_id AS "userId",
       COUNT(t.id)::bigint AS "totalTraces"
@@ -82,21 +106,86 @@ export const userRouter = createTRPCRouter({
       if (input.userIds.length === 0) {
         return [];
       }
-      const users = await ctx.prisma.$queryRaw<
-        Array<{
-          userId: string;
-          firstTrace: Date | null;
-          lastTrace: Date | null;
-          totalPromptTokens: bigint;
-          totalCompletionTokens: bigint;
-          totalTokens: bigint;
-          firstObservation: Date | null;
-          lastObservation: Date | null;
-          totalObservations: bigint;
-          totalCount: bigint;
-          sumCalculatedTotalCost: number;
-        }>
-      >`
+      const dbType = getDbType();
+      const users = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw<
+            Array<{
+              userId: string;
+              firstTrace: Date | null;
+              lastTrace: Date | null;
+              totalPromptTokens: bigint;
+              totalCompletionTokens: bigint;
+              totalTokens: bigint;
+              firstObservation: Date | null;
+              lastObservation: Date | null;
+              totalObservations: bigint;
+              totalCount: bigint;
+              sumCalculatedTotalCost: number;
+            }>
+          >`
+        SELECT
+          t.user_id AS "userId",
+          MIN(t."timestamp") AS "firstTrace",
+          MAX(t."timestamp") AS "lastTrace",
+          CAST(COALESCE(SUM(o.prompt_tokens), 0) AS BIGINT) AS "totalPromptTokens",
+          CAST(COALESCE(SUM(o.completion_tokens), 0) AS BIGINT) AS "totalCompletionTokens",
+          CAST(COALESCE(SUM(o.total_tokens), 0) AS BIGINT) AS "totalTokens",
+          MIN(o.start_time) AS "firstObservation",
+          MAX(o.start_time) AS "lastObservation",
+          CAST(COUNT(DISTINCT o.id) AS BIGINT) AS "totalObservations",
+          CAST((COUNT(*) OVER ()) AS BIGINT) AS "totalCount",
+          SUM(COALESCE(ov.calculated_total_cost, 0)) AS "sumCalculatedTotalCost"
+        FROM
+          traces t
+          LEFT JOIN (
+            SELECT
+              o.trace_id,
+              COALESCE(SUM(o.prompt_tokens), 0) AS "prompt_tokens",
+              COALESCE(SUM(o.completion_tokens), 0) AS "completion_tokens",
+              COALESCE(SUM(o.total_tokens), 0) AS "total_tokens",
+              MIN(o.start_time) AS "firstObservation",
+              MAX(o.start_time) AS "lastObservation",
+              COUNT(DISTINCT o.id) AS "totalObservations"
+            FROM
+              observations o
+            WHERE
+              o.project_id = ${input.projectId}
+            GROUP BY
+              o.trace_id
+          ) o ON o.trace_id = t.id
+          LEFT JOIN (
+            SELECT
+              ov.trace_id,
+              SUM(COALESCE(ov.calculated_total_cost, 0)) AS "calculated_total_cost"
+            FROM
+              observations_view ov
+            WHERE
+              ov."type" = 'GENERATION'
+              AND ov.project_id = ${input.projectId}
+            GROUP BY
+              ov.trace_id
+          ) ov ON ov.trace_id = t.id
+        WHERE
+          t.user_id IN (${Prisma.join(input.userIds)})
+          AND t.project_id = ${input.projectId}
+        GROUP BY
+          1
+      `
+        : await ctx.prisma.$queryRaw<
+            Array<{
+              userId: string;
+              firstTrace: Date | null;
+              lastTrace: Date | null;
+              totalPromptTokens: bigint;
+              totalCompletionTokens: bigint;
+              totalTokens: bigint;
+              firstObservation: Date | null;
+              lastObservation: Date | null;
+              totalObservations: bigint;
+              totalCount: bigint;
+              sumCalculatedTotalCost: number;
+            }>
+          >`
         SELECT
           t.user_id AS "userId",
           MIN(t."timestamp") AS "firstTrace",
@@ -150,18 +239,54 @@ export const userRouter = createTRPCRouter({
         return [];
       }
 
-      const lastScoresOfUsers = await ctx.prisma.$queryRaw<
-        Array<
-          Score & {
-            userId: string;
-          }
-        >
-      >`
+      const lastScoresOfUsers = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw<
+            Array<
+              Score & {
+                userId: string;
+              }
+            >
+          >`
         WITH ranked_scores AS (
           SELECT
             t.user_id,
             s.*,
-            ROW_NUMBER() OVER (PARTITION BY t.user_id ORDER BY s."timestamp" DESC) AS rn 
+            ROW_NUMBER() OVER (PARTITION BY t.user_id ORDER BY s."timestamp" DESC) AS rn
+          FROM
+            scores s
+            JOIN traces t ON t.id = s.trace_id
+          WHERE
+            s.trace_id IS NOT NULL
+            AND s.project_id = ${input.projectId}
+            AND t.project_id = ${input.projectId}
+            AND t.user_id IN (${Prisma.join(users.map((user) => user.userId))})
+            AND t.user_id IS NOT NULL
+        )
+        SELECT
+          user_id "userId",
+          "id",
+          "timestamp",
+          "name",
+          "value",
+          observation_id "observationId",
+          trace_id "traceId",
+          "comment"
+        FROM
+          ranked_scores
+        WHERE rn = 1
+      `
+        : await ctx.prisma.$queryRaw<
+            Array<
+              Score & {
+                userId: string;
+              }
+            >
+          >`
+        WITH ranked_scores AS (
+          SELECT
+            t.user_id,
+            s.*,
+            ROW_NUMBER() OVER (PARTITION BY t.user_id ORDER BY s."timestamp" DESC) AS rn
           FROM
             scores s
             JOIN traces t ON t.id = s.trace_id
@@ -209,22 +334,60 @@ export const userRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }) => {
-      const agg = await ctx.prisma.$queryRaw<
-        {
-          userId: string;
-          firstTrace: Date;
-          lastTrace: Date;
-          totalTraces: bigint;
-          totalPromptTokens: bigint;
-          totalCompletionTokens: bigint;
-          totalTokens: bigint;
-          firstObservation: Date;
-          lastObservation: Date;
-          totalObservations: bigint;
-          sumCalculatedTotalCost: number;
-        }[]
-      >`
-        SELECT 
+      const agg = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw<
+            {
+              userId: string;
+              firstTrace: Date;
+              lastTrace: Date;
+              totalTraces: bigint;
+              totalPromptTokens: bigint;
+              totalCompletionTokens: bigint;
+              totalTokens: bigint;
+              firstObservation: Date;
+              lastObservation: Date;
+              totalObservations: bigint;
+              sumCalculatedTotalCost: number;
+            }[]
+          >`
+        SELECT
+          t.user_id "userId",
+          min(t."timestamp") "firstTrace",
+          max(t."timestamp") "lastTrace",
+          CAST(COUNT(distinct t.id) AS BIGINT) "totalTraces",
+          CAST(COALESCE(SUM(o.prompt_tokens),0) AS BIGINT) "totalPromptTokens",
+          CAST(COALESCE(SUM(o.completion_tokens),0) AS BIGINT) "totalCompletionTokens",
+          CAST(COALESCE(SUM(o.total_tokens),0) AS BIGINT) "totalTokens",
+          MIN(o.start_time) "firstObservation",
+          MAX(o.start_time) "lastObservation",
+          CAST(COUNT(distinct o.id) AS BIGINT) "totalObservations",
+          SUM(COALESCE(o.calculated_total_cost, 0)) AS "sumCalculatedTotalCost"
+        FROM traces t
+        LEFT JOIN observations_view o on o.trace_id = t.id
+        WHERE t.user_id is not null
+        AND t.project_id = ${input.projectId}
+        AND o.project_id = ${input.projectId}
+        AND t.user_id = ${input.userId}
+        GROUP BY 1
+        ORDER BY "totalTokens" DESC
+        FETCH NEXT 50 ROWS ONLY
+      `
+        : await ctx.prisma.$queryRaw<
+            {
+              userId: string;
+              firstTrace: Date;
+              lastTrace: Date;
+              totalTraces: bigint;
+              totalPromptTokens: bigint;
+              totalCompletionTokens: bigint;
+              totalTokens: bigint;
+              firstObservation: Date;
+              lastObservation: Date;
+              totalObservations: bigint;
+              sumCalculatedTotalCost: number;
+            }[]
+          >`
+        SELECT
           t.user_id "userId",
           min(t."timestamp") "firstTrace",
           max(t."timestamp") "lastTrace",

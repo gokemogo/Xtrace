@@ -1,0 +1,197 @@
+# ==================================================
+# DeepTrace 完整部署配置（使用自定义 Dockerfile）
+# 包含：DeepTrace Web + Worker + DM8 + TongRDS
+# ==================================================
+
+version: "3.8"
+
+services:
+  # ==================================================
+  # 1. DM8 数据库 (达梦数据库) - 使用自定义 Dockerfile
+  # ==================================================
+  dm8:
+    container_name: deeptrace-dm8
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.dm8
+      args:
+        - DM8_VERSION=20250506
+    environment:
+      # DM8 配置参数
+      - SYSDBA_PWD=${DM8_PASSWORD:-Deeptrace2025}
+      - PORT=5236
+      - INSTANCE_NAME=${DM8_INSTANCE:-DM8}
+      - PAGE_SIZE=${DM8_PAGE_SIZE:-32}
+      - DB_NAME=${DM8_DB_NAME:-DAMENG}
+      # 是否执行种子数据脚本
+      - RUN_SEED_SCRIPT=${RUN_SEED_SCRIPT:-false}
+    ports:
+      - "${DM8_PORT:-5236}:5236"
+    volumes:
+      # 数据持久化
+      - dm8_data:/opt/dmdbms/data
+      # 日志目录
+      - dm8_logs:/opt/dmdbms/log
+      # 初始化脚本
+      - ./dm8_init.sql:/opt/dmdbms/init.sql
+      - ./dm8_seed_data.sql:/opt/dmdbms/seed_data.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/opt/dmdbms/bin/disql", "SYSDBA/${DM8_PASSWORD:-Deeptrace2025}@localhost:5236", "-E", "SELECT 1 FROM dual"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+    networks:
+      - deeptrace-network
+
+  # ==================================================
+  # 2. TongRDS (Redis-compatible) - 使用自定义 Dockerfile
+  # ==================================================
+  tongrds:
+    container_name: deeptrace-tongrds
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.tongrds
+    environment:
+      # TongRDS 配置参数
+      - PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - MAXMEMORY=${TONGRDS_MAXMEMORY:-256mb}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      # 数据持久化
+      - tongrds_data:/data
+      # 日志目录
+      - tongrds_logs:/opt/tongrds/log
+      # 配置文件（可选，覆盖默认配置）
+      # - ./tongrds.conf:/etc/tongrds/tongrds.conf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - deeptrace-network
+
+  # ==================================================
+  # 3. DeepTrace Web 应用
+  # ==================================================
+  deeptrace-web:
+    container_name: deeptrace-web
+    build:
+      context: ..
+      dockerfile: Dockerfile.dm8
+      args:
+        - NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=
+        - NEXT_PUBLIC_DEMO_PROJECT_ID=
+        - NEXT_PUBLIC_SIGN_UP_DISABLED=
+    ports:
+      - "${WEB_PORT:-3000}:5000"
+    environment:
+      # 数据库配置
+      - DB_TYPE=dm8
+      - DATABASE_URL=dm://SYSDBA:${DM8_PASSWORD:-Deeptrace2025}@dm8:5236
+      - REDIS_HOST=tongrds
+      - REDIS_PORT=6379
+      - REDIS_AUTH=${REDIS_PASSWORD:-}
+
+      # 应用配置
+      - NEXTAUTH_URL=http://localhost:${WEB_PORT:-3000}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-langfuse-secret-change-me}
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      - PORT=5000
+
+      # 安全配置
+      - SALT=${SALT:-langfuse-salt-change-me}
+      - LANGFUSE_WORKER_PASSWORD=${WORKER_PASSWORD:-mybasicauthsecret}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974}
+
+      # 可选配置
+      - EMAIL_FROM_ADDRESS=
+      - SMTP_CONNECTION_URL=
+      - S3_ENDPOINT=
+      - S3_ACCESS_KEY_ID=
+      - S3_SECRET_ACCESS_KEY=
+      - S3_BUCKET_NAME=
+      - S3_REGION=
+
+      # 日志配置
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - NODE_ENV=production
+
+    depends_on:
+      dm8:
+        condition: service_healthy
+      tongrds:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - deeptrace-network
+
+  # ==================================================
+  # 4. DeepTrace Worker 服务
+  # ==================================================
+  deeptrace-worker:
+    container_name: deeptrace-worker
+    build:
+      context: ..
+      dockerfile: Dockerfile.dm8
+    command: ["node", "worker/dist/index.js"]
+    ports:
+      - "${WORKER_PORT:-5001}:5001"
+    environment:
+      # 数据库配置
+      - DB_TYPE=dm8
+      - DATABASE_URL=dm://SYSDBA:${DM8_PASSWORD:-Deeptrace2025}@dm8:5236
+      - REDIS_HOST=tongrds
+      - REDIS_PORT=6379
+      - REDIS_AUTH=${REDIS_PASSWORD:-}
+
+      # 应用配置
+      - LANGFUSE_WORKER_PASSWORD=${WORKER_PASSWORD:-mybasicauthsecret}
+      - NODE_ENV=production
+      - PORT=5001
+
+    depends_on:
+      deeptrace-web:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - deeptrace-network
+
+# ==================================================
+# 数据卷（持久化存储）
+# ==================================================
+volumes:
+  dm8_data:
+    driver: local
+  dm8_logs:
+    driver: local
+  tongrds_data:
+    driver: local
+  tongrds_logs:
+    driver: local
+
+# ==================================================
+# 网络配置
+# ==================================================
+networks:
+  deeptrace-network:
+    name: deeptrace-network
+    driver: bridge

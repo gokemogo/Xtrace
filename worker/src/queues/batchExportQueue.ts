@@ -6,7 +6,8 @@ import {
   QueueName,
   TQueueJobTypes,
 } from "@langfuse/shared";
-import { kyselyPrisma } from "@langfuse/shared/src/db";
+import { prisma, kyselyPrisma } from "@langfuse/shared/src/db";
+import { getDbType } from "@langfuse/shared/src/db-adapter/factory";
 import * as Sentry from "@sentry/node";
 
 import { instrumentAsync } from "../instrumentation";
@@ -36,14 +37,30 @@ export const batchExportJobExecutor = redis
             const displayError =
               e instanceof BaseError ? e.message : "An internal error occurred";
 
-            await kyselyPrisma.$kysely
-              .updateTable("batch_exports")
-              .set("status", BatchExportStatus.FAILED)
-              .set("finished_at", new Date())
-              .set("log", displayError)
-              .where("id", "=", job.data.payload.batchExportId)
-              .where("project_id", "=", job.data.payload.projectId)
-              .execute();
+            // 根据数据库类型选择不同的更新方式
+            if (getDbType() === "dm8") {
+              // DM8 模式：使用 Prisma ORM
+              await prisma.batchExport.update({
+                where: {
+                  id: job.data.payload.batchExportId,
+                },
+                data: {
+                  status: BatchExportStatus.FAILED,
+                  finishedAt: new Date(),
+                  log: displayError,
+                },
+              });
+            } else {
+              // PostgreSQL 模式：使用 Kysely
+              await kyselyPrisma.$kysely
+                .updateTable("batch_exports")
+                .set("status", BatchExportStatus.FAILED)
+                .set("finished_at", new Date())
+                .set("log", displayError)
+                .where("id", "=", job.data.payload.batchExportId)
+                .where("project_id", "=", job.data.payload.projectId)
+                .execute();
+            }
 
             logger.error(
               e,

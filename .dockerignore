@@ -1,17 +1,53 @@
-Dockerfile
-Dockerfile.arm
+# Docker files
+Dockerfile*
+docker-compose*
 .dockerignore
-node_modules
-npm-debug.log
-README.md
-**/.next
+
+# Git
 .git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Dependencies
+node_modules
 **/node_modules
+
+# Build outputs
+.next
+**/.next
+dist
+**/dist
+
+# Test files
+*.test.ts
+*.test.tsx
+__tests__
+**/__tests__
 test.js
-python-test
-*.tar
+
+# Documentation
+*.md
+docs/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log
+
+# Scripts
 docker.sh
 restart.sh
-docs/
-.next/
-prisma/
+python-test
+
+# Large files
+*.tar
+*.tar.gz
+
+# Deploy files
+deploy/

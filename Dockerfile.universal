@@ -1,0 +1,157 @@
+# ==================================================
+# DeepTrace Universal Dockerfile
+# 支持 ARM64 和 AMD64 架构
+# 使用多阶段构建优化镜像大小
+# ==================================================
+
+# 第一阶段：基础镜像
+FROM --platform=$BUILDPLATFORM node:20-alpine AS base
+
+# 安装系统依赖
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache \
+    libcrypto3 \
+    libssl3 \
+    libc6-compat \
+    busybox \
+    ssl_client \
+    openssl \
+    openssl-dev \
+    curl \
+    tini
+
+# 安装 pnpm
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN npm config set registry https://registry.npmmirror.com/ && \
+    npm install -g pnpm@9.5.0 && \
+    pnpm config set registry https://registry.npmmirror.com/
+
+# 第二阶段：安装依赖
+FROM base AS deps
+
+# 清理代理设置
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV http_proxy=
+ENV https_proxy=
+ENV NO_PROXY=*
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
+WORKDIR /app
+
+# 复制 package 文件
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY packages/shared/package.json ./packages/shared/
+COPY web/package.json ./web/
+COPY worker/package.json ./worker/
+COPY ee/package.json ./ee/
+COPY packages/config-eslint/package.json ./packages/config-eslint/
+COPY packages/config-typescript/package.json ./packages/config-typescript/
+
+# 安装依赖
+RUN npm config delete proxy && npm config delete https-proxy
+RUN pnpm install --frozen-lockfile
+
+# 复制源代码
+COPY . .
+
+# 生成 Prisma Client
+RUN cd packages/shared && npx prisma generate
+
+# 第三阶段：构建应用
+FROM deps AS builder
+
+# 设置构建环境变量
+ENV DOCKER_BUILD=1
+ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DB_TYPE=dm8
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV GENERATE_SOURCEMAP=false
+ENV SENTRY_SUPPRESS_GLOBAL_ERROR_HANDLER_FILE_WARNING=1
+ENV SENTRY_SKIP_AUTO_UPLOAD=true
+ENV SENTRY_DISABLE_SOURCEMAP_UPLOAD=true
+
+# 构建应用
+RUN pnpm turbo build --concurrency=1
+
+# 第四阶段：生产镜像
+FROM base AS production
+
+# 清理代理设置
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
+# 设置生产环境变量
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DOCKER_BUILD=0
+ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV DB_TYPE=dm8
+
+# 设置端口
+ENV PORT=3000
+ENV WORKER_PORT=3001
+
+WORKDIR /app
+
+# 创建非 root 用户
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
+
+# 复制必要的文件
+COPY --from=builder --chown=nextjs:nodejs /app/package.json ./
+COPY --from=builder --chown=nextjs:nodejs /app/pnpm-lock.yaml ./
+COPY --from=builder --chown=nextjs:nodejs /app/pnpm-workspace.yaml ./
+COPY --from=builder --chown=nextjs:nodejs /app/turbo.json ./
+
+# 复制 web 应用
+COPY --from=builder --chown=nextjs:nodejs /app/web/package.json ./web/package.json
+COPY --from=builder --chown=nextjs:nodejs /app/web/next.config.mjs ./web/next.config.mjs
+COPY --from=builder --chown=nextjs:nodejs /app/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/web/.next/static ./web/.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/web/public ./web/public
+
+# 复制 worker 应用
+COPY --from=builder --chown=nextjs:nodejs /app/worker/package.json ./worker/package.json
+COPY --from=builder --chown=nextjs:nodejs /app/worker/dist ./worker/dist
+
+# 复制 shared 包
+COPY --from=builder --chown=nextjs:nodejs /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder --chown=nextjs:nodejs /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=builder --chown=nextjs:nodejs /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/packages/shared/prisma ./packages/shared/prisma
+
+# 复制 ee 包
+COPY --from=builder --chown=nextjs:nodejs /app/ee/dist ./ee/dist
+COPY --from=builder --chown=nextjs:nodejs /app/ee/package.json ./ee/package.json
+COPY --from=builder --chown=nextjs:nodejs /app/ee/node_modules ./ee/node_modules
+
+# 复制配置包
+COPY --from=builder --chown=nextjs:nodejs /app/packages/config-eslint ./packages/config-eslint
+COPY --from=builder --chown=nextjs:nodejs /app/packages/config-typescript ./packages/config-typescript
+
+# 复制 node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/worker/node_modules ./worker/node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+
+# 复制 DM8 初始化脚本
+COPY --from=builder --chown=nextjs:nodejs /app/deploy/dm8_init.sql ./deploy/dm8_init.sql
+
+# 切换到非 root 用户
+USER nextjs
+
+# 暴露端口
+EXPOSE 3000 3001
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:3000/api/public/health || exit 1
+
+# 使用 tini 作为 init 进程
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# 启动命令 - 同时启动 web 和 worker
+CMD ["sh", "-c", "node worker/dist/index.js & node web/server.js"]

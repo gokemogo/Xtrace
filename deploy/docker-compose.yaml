@@ -1,0 +1,112 @@
+# ==================================================
+# DeepTrace 部署配置
+# 仅需 DM8 数据库，无需 Redis/TongRDS
+# ==================================================
+#
+# 使用说明：
+# 1. 修改下面的环境变量（标记为 "必须修改" 的配置）
+# 2. 运行：docker compose up -d
+#
+# ==================================================
+
+version: "3.8"
+
+services:
+  # ==================================================
+  # DeepTrace Web 应用
+  # ==================================================
+  deeptrace-web:
+    container_name: deeptrace-web
+    image: deeptrace:latest
+    # 如果使用私有仓库，取消注释下面一行
+    # image: registry.example.com/deeptrace:latest
+    ports:
+      - "3000:5000"
+    environment:
+      # =====================
+      # 数据库类型（固定为 dm8，无需修改）
+      # =====================
+      - DB_TYPE=dm8
+
+      # =====================
+      # DM8 数据库连接配置（必须修改）
+      # 格式: dm://用户名:密码@IP地址:端口
+      # =====================
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@192.168.1.100:5236
+
+      # =====================
+      # 应用配置（建议修改）
+      # =====================
+      # NextAuth 回调地址（改为实际域名）
+      - NEXTAUTH_URL=http://localhost:3000
+      # NextAuth 密钥（必须修改为随机字符串）
+      # 生成命令: openssl rand -base64 32
+      - NEXTAUTH_SECRET=change-me-to-random-secret-key
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      - PORT=5000
+
+      # =====================
+      # 安全配置（必须修改）
+      # =====================
+      # 密码盐值（必须修改为随机字符串）
+      # 生成命令: openssl rand -hex 16
+      - SALT=change-me-to-random-salt
+      # Worker 认证密码
+      - WORKER_PASSWORD=mybasicauthsecret
+      # 加密密钥（必须修改为随机字符串）
+      # 生成命令: openssl rand -hex 32
+      - ENCRYPTION_KEY=change-me-to-random-64-char-hex-key
+
+      # =====================
+      # 日志配置（可选）
+      # =====================
+      - LOG_LEVEL=info
+      - NODE_ENV=production
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ==================================================
+  # DeepTrace Worker 服务
+  # ==================================================
+  deeptrace-worker:
+    container_name: deeptrace-worker
+    image: deeptrace:latest
+    # 如果使用私有仓库，取消注释下面一行
+    # image: registry.example.com/deeptrace:latest
+    command: ["node", "worker/dist/index.js"]
+    ports:
+      - "5001:5001"
+    environment:
+      # =====================
+      # 数据库类型（固定为 dm8，无需修改）
+      # =====================
+      - DB_TYPE=dm8
+
+      # =====================
+      # DM8 数据库连接配置（必须修改，与上面保持一致）
+      # =====================
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@192.168.1.100:5236
+
+      # =====================
+      # 应用配置（与上面保持一致）
+      # =====================
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - NODE_ENV=production
+      - PORT=5001
+
+    depends_on:
+      deeptrace-web:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

@@ -2,6 +2,7 @@ import { VERSION } from "@/src/constants";
 import { ServerPosthog } from "@/src/features/posthog-analytics/ServerPosthog";
 import { Prisma, prisma } from "@langfuse/shared/src/db";
 import { v4 as uuidv4 } from "uuid";
+import { getDbType } from "@langfuse/shared";
 
 // Interval between jobs in milliseconds
 const JOB_INTERVAL_MINUTES = Prisma.raw("60");
@@ -66,23 +67,41 @@ async function jobScheduler(): Promise<
       clientId: string;
     }
 > {
+  const dbType = getDbType();
+
   // Check if job should run, without a lock to not impact performance
   // "not exists" triggers when this is run for the very first time in a container
-  const checkNoLock = await prisma.$queryRaw<Array<{ status: boolean }>>`
-    SELECT (
-      EXISTS (
-        SELECT 1 
-        FROM cron_jobs 
-        WHERE name = 'telemetry' 
-        AND (last_run IS NULL OR last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minute')) 
-        AND (job_started_at IS NULL OR job_started_at <= (NOW() - INTERVAL '${JOB_TIMEOUT_MINUTES} minute'))
-      )
-      OR NOT EXISTS (
-        SELECT 1 
-        FROM cron_jobs 
-        WHERE name = 'telemetry'
-      ) 
-    ) AS status;`;
+  const checkNoLock = dbType === "dm8"
+    ? await prisma.$queryRaw<Array<{ status: boolean }>>`
+        SELECT (
+          EXISTS (
+            SELECT 1
+            FROM cron_jobs
+            WHERE name = 'telemetry'
+            AND (last_run IS NULL OR last_run <= (SYSDATE - ${JOB_INTERVAL_MINUTES} / 1440))
+            AND (job_started_at IS NULL OR job_started_at <= (SYSDATE - ${JOB_TIMEOUT_MINUTES} / 1440))
+          )
+          OR NOT EXISTS (
+            SELECT 1
+            FROM cron_jobs
+            WHERE name = 'telemetry'
+          )
+        ) AS status FROM DUAL`
+    : await prisma.$queryRaw<Array<{ status: boolean }>>`
+        SELECT (
+          EXISTS (
+            SELECT 1
+            FROM cron_jobs
+            WHERE name = 'telemetry'
+            AND (last_run IS NULL OR last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minute'))
+            AND (job_started_at IS NULL OR job_started_at <= (NOW() - INTERVAL '${JOB_TIMEOUT_MINUTES} minute'))
+          )
+          OR NOT EXISTS (
+            SELECT 1
+            FROM cron_jobs
+            WHERE name = 'telemetry'
+          )
+        ) AS status;`;
   // Return if job should not run
   if (checkNoLock.length !== 1) {
     console.error("Telemetry failed to check if job should run");
@@ -91,30 +110,53 @@ async function jobScheduler(): Promise<
   if (!checkNoLock[0]!.status) return { shouldRunJob: false };
 
   // Lock table and update job_started_at if no other job was created in the meantime
-  const res = await prisma.$transaction([
-    prisma.$executeRaw`LOCK TABLE cron_jobs IN SHARE ROW EXCLUSIVE MODE`,
-    prisma.$queryRaw<
-      Array<{
-        name: string;
-        last_run: Date | null;
-        job_started_at: Date | null;
-        state: string | null;
-      }>
-    >`INSERT INTO cron_jobs (name, last_run, job_started_at, state)
-    VALUES ('telemetry', NULL, CURRENT_TIMESTAMP, NULL)
-    ON CONFLICT (name) 
-    DO UPDATE 
-    SET job_started_at = CASE 
-        WHEN (cron_jobs.last_run IS NULL OR cron_jobs.last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minutes')) 
+  const res = dbType === "dm8"
+    ? await prisma.$transaction([
+        prisma.$executeRaw`LOCK TABLE cron_jobs IN SHARE MODE`,
+        prisma.$queryRaw<
+          Array<{
+            name: string;
+            last_run: Date | null;
+            job_started_at: Date | null;
+            state: string | null;
+          }>
+        >`MERGE INTO cron_jobs target
+        USING (SELECT 'telemetry' AS name FROM DUAL) source
+        ON (target.name = source.name)
+        WHEN MATCHED THEN UPDATE SET
+          job_started_at = CASE
+            WHEN (target.last_run IS NULL OR target.last_run <= (SYSDATE - ${JOB_INTERVAL_MINUTES} / 1440))
+              AND (target.job_started_at IS NULL OR target.job_started_at <= (SYSDATE - ${JOB_TIMEOUT_MINUTES} / 1440))
+            THEN CURRENT_TIMESTAMP
+            ELSE target.job_started_at
+          END
+        WHEN NOT MATCHED THEN INSERT (name, last_run, job_started_at, state)
+          VALUES ('telemetry', NULL, CURRENT_TIMESTAMP, NULL)`,
+      ])
+    : await prisma.$transaction([
+        prisma.$executeRaw`LOCK TABLE cron_jobs IN SHARE ROW EXCLUSIVE MODE`,
+        prisma.$queryRaw<
+          Array<{
+            name: string;
+            last_run: Date | null;
+            job_started_at: Date | null;
+            state: string | null;
+          }>
+        >`INSERT INTO cron_jobs (name, last_run, job_started_at, state)
+        VALUES ('telemetry', NULL, CURRENT_TIMESTAMP, NULL)
+        ON CONFLICT (name)
+        DO UPDATE
+        SET job_started_at = CASE
+            WHEN (cron_jobs.last_run IS NULL OR cron_jobs.last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minutes'))
+              AND (cron_jobs.job_started_at IS NULL OR cron_jobs.job_started_at <= (NOW() - INTERVAL '${JOB_TIMEOUT_MINUTES} minutes'))
+            THEN CURRENT_TIMESTAMP
+            ELSE cron_jobs.job_started_at
+            END
+        WHERE cron_jobs.name = 'telemetry'
+          AND (cron_jobs.last_run IS NULL OR cron_jobs.last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minutes'))
           AND (cron_jobs.job_started_at IS NULL OR cron_jobs.job_started_at <= (NOW() - INTERVAL '${JOB_TIMEOUT_MINUTES} minutes'))
-        THEN CURRENT_TIMESTAMP 
-        ELSE cron_jobs.job_started_at 
-        END
-    WHERE cron_jobs.name = 'telemetry' 
-      AND (cron_jobs.last_run IS NULL OR cron_jobs.last_run <= (NOW() - INTERVAL '${JOB_INTERVAL_MINUTES} minutes')) 
-      AND (cron_jobs.job_started_at IS NULL OR cron_jobs.job_started_at <= (NOW() - INTERVAL '${JOB_TIMEOUT_MINUTES} minutes'))
-    RETURNING *`,
-  ]);
+        RETURNING *`,
+      ]);
   const createJobLocked = res[1];
 
   // Other job was created in the meantime
@@ -223,16 +265,28 @@ async function posthogTelemetry({
     });
 
     // Domains (no PII)
-    const domains = await prisma.$queryRaw<Array<{ domain: string }>>`
-      SELECT
-        substring(email FROM position('@' in email) + 1) as domain,
-        count(id)::int as "userCount"
-      FROM users
-      WHERE email ILIKE '%@%'
-      GROUP BY 1
-      ORDER BY count(id) desc
-      LIMIT 30
-    `;
+    const dbType = getDbType();
+    const domains = dbType === "dm8"
+      ? await prisma.$queryRaw<Array<{ domain: string }>>`
+          SELECT
+            SUBSTR(email, INSTR(email, '@') + 1) as domain,
+            CAST(count(id) AS INTEGER) as "userCount"
+          FROM users
+          WHERE email LIKE '%@%'
+          GROUP BY 1
+          ORDER BY count(id) desc
+          FETCH NEXT 30 ROWS ONLY
+        `
+      : await prisma.$queryRaw<Array<{ domain: string }>>`
+          SELECT
+            substring(email FROM position('@' in email) + 1) as domain,
+            count(id)::int as "userCount"
+          FROM users
+          WHERE email ILIKE '%@%'
+          GROUP BY 1
+          ORDER BY count(id) desc
+          LIMIT 30
+        `;
 
     posthog.capture({
       distinctId: "docker:" + clientId,

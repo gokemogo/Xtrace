@@ -6,12 +6,20 @@ import {
   TQueueJobTypes,
 } from "@langfuse/shared";
 import { evaluate, createEvalJobs } from "../features/evaluation/eval-service";
-import { kyselyPrisma } from "@langfuse/shared/src/db";
+import { prisma, kyselyPrisma } from "@langfuse/shared/src/db";
+import { getDbType } from "@langfuse/shared/src/db-adapter/factory";
 import logger from "../logger";
-import { sql } from "kysely";
 import { redis } from "../redis";
 import { instrumentAsync } from "../instrumentation";
 import * as Sentry from "@sentry/node";
+
+// 仅在 PostgreSQL 模式下导入 Kysely
+let sql: any;
+if (getDbType() === "postgresql") {
+  try {
+    sql = require("kysely").sql;
+  } catch {}
+}
 
 export const evalQueue = redis
   ? new Queue<TQueueJobTypes[QueueName.EvaluationExecution]>(
@@ -65,14 +73,30 @@ export const evalJobExecutor = redis
             const displayError =
               e instanceof BaseError ? e.message : "An internal error occurred";
 
-            await kyselyPrisma.$kysely
-              .updateTable("job_executions")
-              .set("status", sql`'ERROR'::"JobExecutionStatus"`)
-              .set("end_time", new Date())
-              .set("error", displayError)
-              .where("id", "=", job.data.payload.jobExecutionId)
-              .where("project_id", "=", job.data.payload.projectId)
-              .execute();
+            // 根据数据库类型选择不同的更新方式
+            if (getDbType() === "dm8") {
+              // DM8 模式：使用 Prisma ORM
+              await prisma.jobExecution.update({
+                where: {
+                  id: job.data.payload.jobExecutionId,
+                },
+                data: {
+                  status: "ERROR",
+                  endTime: new Date(),
+                  error: displayError,
+                },
+              });
+            } else {
+              // PostgreSQL 模式：使用 Kysely
+              await kyselyPrisma.$kysely
+                .updateTable("job_executions")
+                .set("status", sql`'ERROR'::"JobExecutionStatus"`)
+                .set("end_time", new Date())
+                .set("error", displayError)
+                .where("id", "=", job.data.payload.jobExecutionId)
+                .where("project_id", "=", job.data.payload.projectId)
+                .execute();
+            }
 
             // do not log expected errors (api failures + missing api keys not provided by the user)
             if (

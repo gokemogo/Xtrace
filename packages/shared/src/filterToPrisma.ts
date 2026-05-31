@@ -2,7 +2,9 @@ import { Prisma } from "@prisma/client";
 import { ColumnDefinition, type TableNames } from "./tableDefinitions";
 import { FilterState } from "./types";
 import { filterOperators } from "./interfaces/filters";
+import { getDbType, type DbType } from "./db-adapter";
 
+// PostgreSQL 操作符映射
 const operatorReplacements = {
   "any of": "IN",
   "none of": "NOT IN",
@@ -12,10 +14,27 @@ const operatorReplacements = {
   "ends with": "ILIKE",
 };
 
+// DM8 操作符映射（DM8 默认大小写不敏感，使用 LIKE）
+const operatorReplacementsDm8 = {
+  "any of": "IN",
+  "none of": "NOT IN",
+  contains: "LIKE",
+  "does not contain": "NOT LIKE",
+  "starts with": "LIKE",
+  "ends with": "LIKE",
+};
+
 const arrayOperatorReplacements = {
   "any of": "&&",
   "all of": "@>",
   "none of": "&&",
+};
+
+// DM8 数组操作符映射
+const arrayOperatorReplacementsDm8 = {
+  "any of": "JSON_OVERLAPS",
+  "all of": "JSON_CONTAINS",
+  "none of": "JSON_OVERLAPS",
 };
 
 /**
@@ -42,6 +61,8 @@ export function tableColumnsToSqlFilter(
   tableColumns: ColumnDefinition[],
   table: TableNames
 ): Prisma.Sql {
+  const dbType = getDbType();
+
   const internalFilters = filters.map(filter => {
     // Get column definition to map column to internal name, e.g. "t.id"
     const col = tableColumns.find(
@@ -64,17 +85,22 @@ export function tableColumnsToSqlFilter(
 
   const statements = internalFilters.map(filterAndColumn => {
     const filter = filterAndColumn.condition;
+
+    // 根据数据库类型选择操作符映射
+    const opReplacements = dbType === "dm8" ? operatorReplacementsDm8 : operatorReplacements;
+    const arrOpReplacements = dbType === "dm8" ? arrayOperatorReplacementsDm8 : arrayOperatorReplacements;
+
     const operatorPrisma =
       filter.type === "arrayOptions"
         ? Prisma.raw(
-            arrayOperatorReplacements[
-              filter.operator as keyof typeof arrayOperatorReplacements
+            arrOpReplacements[
+              filter.operator as keyof typeof arrOpReplacements
             ]
           )
-        : filter.operator in operatorReplacements
+        : filter.operator in opReplacements
           ? Prisma.raw(
-              operatorReplacements[
-                filter.operator as keyof typeof operatorReplacements
+              opReplacements[
+                filter.operator as keyof typeof opReplacements
               ]
             )
           : Prisma.raw(filter.operator); //checked by zod
@@ -83,11 +109,19 @@ export function tableColumnsToSqlFilter(
     let valuePrisma: Prisma.Sql;
     switch (filter.type) {
       case "datetime":
-        valuePrisma = Prisma.sql`${filter.value}::timestamp with time zone at time zone 'UTC'`;
+        if (dbType === "dm8") {
+          valuePrisma = Prisma.sql`CAST(${filter.value} AS TIMESTAMP WITH TIME ZONE)`;
+        } else {
+          valuePrisma = Prisma.sql`${filter.value}::timestamp with time zone at time zone 'UTC'`;
+        }
         break;
       case "number":
       case "numberObject":
-        valuePrisma = Prisma.sql`${filter.value.toString()}::DOUBLE PRECISION`;
+        if (dbType === "dm8") {
+          valuePrisma = Prisma.sql`CAST(${filter.value.toString()} AS DOUBLE)`;
+        } else {
+          valuePrisma = Prisma.sql`${filter.value.toString()}::DOUBLE PRECISION`;
+        }
         break;
       case "string":
       case "stringObject":
@@ -99,24 +133,45 @@ export function tableColumnsToSqlFilter(
         )})`;
         break;
       case "arrayOptions":
-        valuePrisma = Prisma.sql`ARRAY[${Prisma.join(
-          filter.value.map(v => Prisma.sql`${v}`),
-          ", "
-        )}] `;
+        if (dbType === "dm8") {
+          // DM8 使用 JSON_ARRAY
+          valuePrisma = Prisma.sql`JSON_ARRAY(${Prisma.join(
+            filter.value.map(v => Prisma.sql`${v}`),
+            ", "
+          )}) `;
+        } else {
+          valuePrisma = Prisma.sql`ARRAY[${Prisma.join(
+            filter.value.map(v => Prisma.sql`${v}`),
+            ", "
+          )}] `;
+        }
         break;
 
       case "boolean":
         valuePrisma = Prisma.sql`${filter.value}`;
         break;
     }
-    const jsonKeyPrisma =
-      filter.type === "stringObject" || filter.type === "numberObject"
-        ? Prisma.sql`->>${filter.key}`
-        : Prisma.empty;
+
+    // JSON 键访问
+    let jsonKeyPrisma: Prisma.Sql;
+    if (filter.type === "stringObject" || filter.type === "numberObject") {
+      if (dbType === "dm8") {
+        // DM8 使用 JSON_VALUE
+        jsonKeyPrisma = Prisma.sql`, JSON_VALUE(${filterAndColumn.internalColumn}, '$.${filter.key}')`;
+      } else {
+        jsonKeyPrisma = Prisma.sql`->>${filter.key}`;
+      }
+    } else {
+      jsonKeyPrisma = Prisma.empty;
+    }
+
     const [cast1, cast2] =
       filter.type === "numberObject"
-        ? [Prisma.raw("cast("), Prisma.raw(" as double precision)")]
+        ? dbType === "dm8"
+          ? [Prisma.raw("CAST("), Prisma.raw(" AS DOUBLE)")]
+          : [Prisma.raw("cast("), Prisma.raw(" as double precision)")]
         : [Prisma.empty, Prisma.empty];
+
     const [valuePrefix, valueSuffix] =
       filter.type === "string" || filter.type === "stringObject"
         ? [
@@ -132,12 +187,19 @@ export function tableColumnsToSqlFilter(
               : Prisma.empty,
           ]
         : [Prisma.empty, Prisma.empty];
+
     const [funcPrisma1, funcPrisma2] =
       filter.type === "arrayOptions" && filter.operator === "none of"
         ? [Prisma.raw("NOT ("), Prisma.raw(")")]
         : [Prisma.empty, Prisma.empty];
 
-    return Prisma.sql`${funcPrisma1}${cast1}${filterAndColumn.internalColumn}${jsonKeyPrisma}${cast2} ${operatorPrisma} ${valuePrefix}${valuePrisma}${castValueToPostgresTypes(filterAndColumn.column, filterAndColumn.table)}${valueSuffix}${funcPrisma2}`;
+    // 对于 DM8 的 JSON 键访问，需要特殊处理
+    if (dbType === "dm8" && (filter.type === "stringObject" || filter.type === "numberObject")) {
+      // DM8: JSON_VALUE(column, '$.key') operator value
+      return Prisma.sql`${funcPrisma1}${cast1}JSON_VALUE(${filterAndColumn.internalColumn}, '$.${filter.key}')${cast2} ${operatorPrisma} ${valuePrefix}${valuePrisma}${valueSuffix}${funcPrisma2}`;
+    }
+
+    return Prisma.sql`${funcPrisma1}${cast1}${filterAndColumn.internalColumn}${jsonKeyPrisma}${cast2} ${operatorPrisma} ${valuePrefix}${valuePrisma}${castValueToPostgresTypes(filterAndColumn.column, filterAndColumn.table, dbType)}${valueSuffix}${funcPrisma2}`;
   });
   if (statements.length === 0) {
     return Prisma.empty;
@@ -150,15 +212,21 @@ export function tableColumnsToSqlFilter(
 
 const castValueToPostgresTypes = (
   column: ColumnDefinition,
-  table: TableNames
+  table: TableNames,
+  dbType: DbType = "postgresql"
 ) => {
-  return column.name === "type" &&
+  if (column.name === "type" &&
     (table === "observations" ||
       table === "traces_observations" ||
       table === "traces_observationsview" ||
-      table === "traces_parent_observation_scores")
-    ? Prisma.sql`::"ObservationType"`
-    : Prisma.empty;
+      table === "traces_parent_observation_scores")) {
+    if (dbType === "dm8") {
+      // DM8 不需要类型转换，使用 VARCHAR2 即可
+      return Prisma.empty;
+    }
+    return Prisma.sql`::"ObservationType"`;
+  }
+  return Prisma.empty;
 };
 
 const dateOperators = filterOperators["datetime"];
@@ -168,11 +236,19 @@ export const datetimeFilterToPrismaSql = (
   operator: (typeof dateOperators)[number],
   value: Date
 ) => {
+  const dbType = getDbType();
+
   if (!dateOperators.includes(operator)) {
     throw new Error("Invalid operator: " + operator);
   }
   if (isNaN(value.getTime())) {
     throw new Error("Invalid date: " + value.toString());
+  }
+
+  if (dbType === "dm8") {
+    return Prisma.sql`AND ${Prisma.raw(safeColumn)} ${Prisma.raw(
+      operator
+    )} CAST(${value} AS TIMESTAMP WITH TIME ZONE)`;
   }
 
   return Prisma.sql`AND ${Prisma.raw(safeColumn)} ${Prisma.raw(

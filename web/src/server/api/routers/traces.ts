@@ -17,6 +17,7 @@ import { tracesTableCols } from "@langfuse/shared";
 import {
   datetimeFilterToPrismaSql,
   tableColumnsToSqlFilterAndPrefix,
+  getDbType,
 } from "@langfuse/shared";
 import { throwIfNoAccess } from "@/src/features/rbac/utils/checkAccess";
 import { TRPCError } from "@trpc/server";
@@ -69,13 +70,21 @@ export const traceRouter = createTRPCRouter({
             )
           : Prisma.empty;
 
+      const dbType = getDbType();
       const searchCondition = input.searchQuery
-        ? Prisma.sql`AND (
-        t."id" ILIKE ${`%${input.searchQuery}%`} OR 
-        t."external_id" ILIKE ${`%${input.searchQuery}%`} OR 
-        t."user_id" ILIKE ${`%${input.searchQuery}%`} OR 
-        t."name" ILIKE ${`%${input.searchQuery}%`}
-      )`
+        ? dbType === "dm8"
+          ? Prisma.sql`AND (
+          t."id" LIKE ${`%${input.searchQuery}%`} OR
+          t."external_id" LIKE ${`%${input.searchQuery}%`} OR
+          t."user_id" LIKE ${`%${input.searchQuery}%`} OR
+          t."name" LIKE ${`%${input.searchQuery}%`}
+        )`
+          : Prisma.sql`AND (
+          t."id" ILIKE ${`%${input.searchQuery}%`} OR
+          t."external_id" ILIKE ${`%${input.searchQuery}%`} OR
+          t."user_id" ILIKE ${`%${input.searchQuery}%`} OR
+          t."name" ILIKE ${`%${input.searchQuery}%`}
+        )`
         : Prisma.empty;
 
       const tracesQuery = createTracesQuery(
@@ -170,6 +179,7 @@ export const traceRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }) => {
+      const dbType = getDbType();
       const { timestampFilter } = input;
       const prismaTimestampFilter =
         timestampFilter?.type === "datetime"
@@ -226,14 +236,25 @@ export const traceRouter = createTRPCRouter({
             )
           : Prisma.sql``;
 
-      const tags: { count: number; value: string }[] = await ctx.prisma
-        .$queryRaw(Prisma.sql`
-        SELECT COUNT(*)::integer AS "count", tags.tag as value
-        FROM traces, UNNEST(traces.tags) AS tags(tag)
-        WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
-        GROUP BY tags.tag
-        LIMIT 1000
-      `);
+      let tags: { count: number; value: string }[] = [];
+      if (dbType === "dm8") {
+        // DM8 版本：使用 JSON_TABLE 替代 UNNEST
+        tags = await ctx.prisma.$queryRaw(Prisma.sql`
+          SELECT COUNT(*) AS "count", tag.value
+          FROM traces, JSON_TABLE(traces.tags, '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) tag
+          WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
+          GROUP BY tag.value
+          FETCH NEXT 1000 ROWS ONLY
+        `);
+      } else {
+        tags = await ctx.prisma.$queryRaw(Prisma.sql`
+          SELECT COUNT(*)::integer AS "count", tags.tag as value
+          FROM traces, UNNEST(traces.tags) AS tags(tag)
+          WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
+          GROUP BY tags.tag
+          LIMIT 1000
+        `);
+      }
       const res: TraceOptions = {
         scores_avg: scores.map((score) => score.name),
         name: names
@@ -527,6 +548,76 @@ function createTracesQuery(
   filterCondition: Prisma.Sql,
   orderByCondition: Prisma.Sql,
 ) {
+  const dbType = getDbType();
+
+  if (dbType === "dm8") {
+    // DM8 版本：使用子查询替代 LEFT JOIN LATERAL
+    return Prisma.sql`
+    SELECT
+        ${select}
+    FROM
+      "traces" AS t
+    LEFT JOIN (
+      SELECT
+        trace_id,
+        SUM(prompt_tokens) AS "promptTokens",
+        SUM(completion_tokens) AS "completionTokens",
+        SUM(total_tokens) AS "totalTokens",
+        SUM(calculated_total_cost) AS "calculatedTotalCost",
+        SUM(calculated_input_cost) AS "calculatedInputCost",
+        SUM(calculated_output_cost) AS "calculatedOutputCost",
+        COALESCE(
+          MAX(CASE WHEN level = 'ERROR' THEN 'ERROR' END),
+          MAX(CASE WHEN level = 'WARNING' THEN 'WARNING' END),
+          MAX(CASE WHEN level = 'DEFAULT' THEN 'DEFAULT' END),
+          'DEBUG'
+        ) AS "level"
+      FROM
+        "observations_view"
+      WHERE
+        "type" = 'GENERATION'
+        AND "project_id" = ${projectId}
+        ${observationTimeseriesFilter}
+      GROUP BY trace_id
+    ) AS tm ON tm.trace_id = t.id
+    LEFT JOIN (
+      SELECT
+        trace_id,
+        COUNT(*) AS "observationCount",
+        DATEDIFF(SECOND, MIN("start_time"), COALESCE(MAX("end_time"), MAX("start_time"))) AS "latency"
+      FROM
+          "observations"
+      WHERE
+          "project_id" = ${projectId}
+          ${observationTimeseriesFilter}
+      GROUP BY trace_id
+    ) AS tl ON tl.trace_id = t.id
+    LEFT JOIN (
+      SELECT
+          trace_id,
+          JSON_OBJECTAGG(name VALUE avg_value) AS "scores_avg"
+      FROM (
+          SELECT
+              trace_id,
+              name,
+              AVG(value) avg_value
+          FROM
+              scores
+          GROUP BY
+              trace_id, name
+      ) tmp
+      GROUP BY trace_id
+    ) AS s_avg ON s_avg.trace_id = t.id
+    WHERE
+      t."project_id" = ${projectId}
+      ${searchCondition}
+      ${filterCondition}
+    ${orderByCondition}
+    OFFSET ${page * limit} ROWS FETCH NEXT ${limit} ROWS ONLY
+  `;
+  }
+
+  // PostgreSQL 版本：使用 LEFT JOIN LATERAL
   return Prisma.sql`
   SELECT
       ${select}
@@ -540,11 +631,11 @@ function createTracesQuery(
       SUM(calculated_total_cost) AS "calculatedTotalCost",
       SUM(calculated_input_cost) AS "calculatedInputCost",
       SUM(calculated_output_cost) AS "calculatedOutputCost",
-      COALESCE(  
-        MAX(CASE WHEN level = 'ERROR' THEN 'ERROR' END),  
-        MAX(CASE WHEN level = 'WARNING' THEN 'WARNING' END),  
-        MAX(CASE WHEN level = 'DEFAULT' THEN 'DEFAULT' END),  
-        'DEBUG'  
+      COALESCE(
+        MAX(CASE WHEN level = 'ERROR' THEN 'ERROR' END),
+        MAX(CASE WHEN level = 'WARNING' THEN 'WARNING' END),
+        MAX(CASE WHEN level = 'DEFAULT' THEN 'DEFAULT' END),
+        'DEBUG'
       ) AS "level"
     FROM
       "observations_view"
@@ -580,7 +671,7 @@ function createTracesQuery(
             name
     ) tmp
   ) AS s_avg ON true
-  WHERE 
+  WHERE
     t."project_id" = ${projectId}
     ${searchCondition}
     ${filterCondition}

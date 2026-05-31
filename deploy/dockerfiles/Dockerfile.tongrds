@@ -1,0 +1,60 @@
+# ==================================================
+# TongRDS (Redis-compatible) Dockerfile
+# 用于构建 TongRDS 缓存服务镜像
+# ==================================================
+
+# 使用 Alpine Linux 作为基础镜像（轻量级）
+FROM alpine:3.18
+
+# 设置标签
+LABEL maintainer="DeepTrace Team"
+LABEL description="TongRDS (Redis-compatible) Cache Server"
+LABEL version="1.0"
+
+# 设置环境变量
+ENV TONGRDS_VERSION=7.0.0
+ENV TONGRDS_HOME=/opt/tongrds
+ENV TONGRDS_DATA=/data
+ENV TONGRDS_CONF=/etc/tongrds
+
+# 安装系统依赖
+RUN apk add --no-cache \
+    bash \
+    curl \
+    tini \
+    su-exec
+
+# 创建 tongrds 用户
+RUN addgroup -S tongrds && \
+    adduser -S -G tongrds -h $TONGRDS_HOME tongrds
+
+# 创建目录结构
+RUN mkdir -p $TONGRDS_HOME \
+    $TONGRDS_DATA \
+    $TONGRDS_CONF \
+    $TONGRDS_HOME/log \
+    && chown -R tongrds:tongrds $TONGRDS_HOME $TONGRDS_DATA $TONGRDS_CONF
+
+# 复制 Redis 配置文件（作为 TongRDS 基础配置）
+COPY tongrds.conf $TONGRDS_CONF/tongrds.conf
+
+# 复制启动脚本
+COPY tongrds-entrypoint.sh /usr/local/bin/tongrds-entrypoint.sh
+RUN chmod +x /usr/local/bin/tongrds-entrypoint.sh
+
+# 安装 Redis（TongRDS 兼容 Redis 协议）
+RUN apk add --no-cache redis
+
+# 暴露端口
+EXPOSE 6379
+
+# 设置数据卷
+VOLUME [$TONGRDS_DATA]
+
+# 健康检查
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=10s \
+    CMD redis-cli ping || exit 1
+
+# 启动命令
+ENTRYPOINT ["tini", "--"]
+CMD ["tongrds-entrypoint.sh"]

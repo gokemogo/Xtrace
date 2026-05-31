@@ -1,4 +1,3 @@
-import { Queue } from "bullmq";
 import { randomUUID } from "crypto";
 import express from "express";
 import basicAuth from "express-basic-auth";
@@ -12,21 +11,34 @@ import {
   TQueueJobTypes,
   TraceUpsertEventType,
 } from "@langfuse/shared";
+import { getDbType } from "@langfuse/shared/src/db-adapter/factory";
 
 import { env } from "../env";
 import logger from "../logger";
-import { batchExportQueue } from "../queues/batchExportQueue";
-import { redis } from "../redis";
+import { getEvalQueueInstance, getBatchExportQueueInstance } from "../queue-factory";
 import emojis from "./emojis";
 import { checkContainerHealth } from "../features/health";
 
-const router = express.Router();
+// BullMQ 队列（仅在 PostgreSQL 模式下使用）
+let bullmqEvalQueue: any = null;
+let bullmqBatchExportQueue: any = null;
 
-export const evalQueue = redis
-  ? new Queue<TQueueJobTypes[QueueName.TraceUpsert]>(QueueName.TraceUpsert, {
-      connection: redis,
-    })
-  : null;
+if (getDbType() === "postgresql") {
+  try {
+    const { Queue } = require("bullmq");
+    const { redis } = require("../redis");
+    if (redis) {
+      bullmqEvalQueue = new Queue(QueueName.TraceUpsert, {
+        connection: redis,
+      });
+      bullmqBatchExportQueue = require("../queues/batchExportQueue").batchExportQueue;
+    }
+  } catch (e) {
+    logger.warn("Failed to initialize BullMQ queues, falling back to database queues");
+  }
+}
+
+const router = express.Router();
 
 type EventsResponse = {
   status: "success" | "error";
@@ -66,8 +78,16 @@ router
       if (event.data.name === EventName.TraceUpsert) {
         // Find set of traces per project. There might be two events for the same trace in one API call.
         // If we don't deduplicate, we will end up processing the same trace twice on two different workers in parallel.
-        const jobs = createRedisEvents(event.data.payload);
-        await evalQueue?.addBulk(jobs); // add all jobs as bulk
+        const jobs = createQueueEvents(event.data.payload);
+
+        if (getDbType() === "postgresql" && bullmqEvalQueue) {
+          // PostgreSQL 模式：使用 BullMQ
+          await bullmqEvalQueue.addBulk(jobs);
+        } else {
+          // DM8 模式：使用数据库队列
+          const evalQueue = await getEvalQueueInstance();
+          await evalQueue.addBulk(jobs);
+        }
 
         return res.json({
           status: "success",
@@ -75,12 +95,21 @@ router
       }
 
       if (event.data.name === EventName.BatchExport) {
-        await batchExportQueue?.add(event.data.name, {
-          id: event.data.payload.batchExportId, // Use the batchExportId to deduplicate when the same job is sent multiple times
+        const jobData = {
+          id: event.data.payload.batchExportId,
           name: QueueJobs.BatchExportJob,
           timestamp: new Date(),
           payload: event.data.payload,
-        });
+        };
+
+        if (getDbType() === "postgresql" && bullmqBatchExportQueue) {
+          // PostgreSQL 模式：使用 BullMQ
+          await bullmqBatchExportQueue.add(event.data.name, jobData);
+        } else {
+          // DM8 模式：使用数据库队列
+          const batchExportQueue = await getBatchExportQueueInstance();
+          await batchExportQueue.add(event.data.name, jobData);
+        }
 
         return res.json({
           status: "success",
@@ -101,7 +130,7 @@ router.use("/emojis", emojis);
 
 export default router;
 
-export function createRedisEvents(events: TraceUpsertEventType[]) {
+export function createQueueEvents(events: TraceUpsertEventType[]) {
   const uniqueTracesPerProject = events.reduce((acc, event) => {
     if (!acc.get(event.projectId)) {
       acc.set(event.projectId, new Set());

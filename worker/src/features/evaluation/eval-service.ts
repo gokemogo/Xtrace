@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
 import Handlebars from "handlebars";
-import { sql } from "kysely";
 import { z } from "zod";
 
 import {
@@ -24,7 +23,7 @@ import {
   ZodModelConfig,
 } from "@langfuse/shared";
 import { decrypt } from "@langfuse/shared/encryption";
-import { kyselyPrisma, prisma } from "@langfuse/shared/src/db";
+import { prisma } from "@langfuse/shared/src/db";
 
 import logger from "../../logger";
 import { evalQueue } from "../../queues/evalQueue";
@@ -36,12 +35,12 @@ export const createEvalJobs = async ({
 }: {
   event: z.infer<typeof TraceUpsertEventSchema>;
 }) => {
-  const configs = await kyselyPrisma.$kysely
-    .selectFrom("job_configurations")
-    .selectAll()
-    .where(sql.raw("job_type::text"), "=", "EVAL")
-    .where("project_id", "=", event.projectId)
-    .execute();
+  const configs = await prisma.jobConfiguration.findMany({
+    where: {
+      jobType: "EVAL",
+      projectId: event.projectId,
+    },
+  });
 
   if (configs.length === 0) {
     logger.debug("No evaluation jobs found for project", event.projectId);
@@ -74,13 +73,14 @@ export const createEvalJobs = async ({
 
     const traces = await prisma.$queryRaw<Array<{ id: string }>>(joinedQuery);
 
-    const existingJob = await kyselyPrisma.$kysely
-      .selectFrom("job_executions")
-      .select("id")
-      .where("project_id", "=", event.projectId)
-      .where("job_configuration_id", "=", config.id)
-      .where("job_input_trace_id", "=", event.traceId)
-      .execute();
+    const existingJob = await prisma.jobExecution.findFirst({
+      where: {
+        projectId: event.projectId,
+        jobConfigurationId: config.id,
+        jobInputTraceId: event.traceId,
+      },
+      select: { id: true },
+    });
 
     // if we matched a trace, we might want to create a job
     if (traces.length > 0) {
@@ -91,7 +91,7 @@ export const createEvalJobs = async ({
       const jobExecutionId = randomUUID();
 
       // deduplication: if a job exists already for a trace event, we do not create a new one.
-      if (existingJob.length > 0) {
+      if (existingJob) {
         logger.info(
           `Eval job for config ${config.id} and trace ${event.traceId} already exists`
         );
@@ -101,9 +101,9 @@ export const createEvalJobs = async ({
       // apply sampling. Only if the job is sampled, we create a job
       // user supplies a number between 0 and 1, which is the probability of sampling
 
-      if (parseFloat(config.sampling) !== 1) {
+      if (parseFloat(config.sampling.toString()) !== 1) {
         const random = Math.random();
-        if (random > parseFloat(config.sampling)) {
+        if (random > parseFloat(config.sampling.toString())) {
           logger.info(
             `Eval job for config ${config.id} and trace ${event.traceId} was sampled out`
           );
@@ -115,17 +115,16 @@ export const createEvalJobs = async ({
         `Creating eval job for config ${config.id} and trace ${event.traceId}`
       );
 
-      await kyselyPrisma.$kysely
-        .insertInto("job_executions")
-        .values({
+      await prisma.jobExecution.create({
+        data: {
           id: jobExecutionId,
-          project_id: event.projectId,
-          job_configuration_id: config.id,
-          job_input_trace_id: event.traceId,
-          status: sql`'PENDING'::"JobExecutionStatus"`,
-          start_time: new Date(),
-        })
-        .execute();
+          projectId: event.projectId,
+          jobConfigurationId: config.id,
+          jobInputTraceId: event.traceId,
+          status: "PENDING",
+          startTime: new Date(),
+        },
+      });
 
       // add the job to the next queue so that eval can be executed
       evalQueue?.add(
@@ -154,16 +153,17 @@ export const createEvalJobs = async ({
       // if we do not have a match, and execution exists, we mark the job as cancelled
       // we do this, because a second trace event might 'deselect' a trace
       logger.debug(`Eval job for config ${config.id} did not match trace`);
-      if (existingJob.length > 0) {
+      if (existingJob) {
         logger.info(
           `Cancelling eval job for config ${config.id} and trace ${event.traceId}`
         );
-        await kyselyPrisma.$kysely
-          .updateTable("job_executions")
-          .set("status", sql`'CANCELLED'::"JobExecutionStatus"`)
-          .set("end_time", new Date())
-          .where("id", "=", existingJob[0].id)
-          .execute();
+        await prisma.jobExecution.update({
+          where: { id: existingJob.id },
+          data: {
+            status: "CANCELLED",
+            endTime: new Date(),
+          },
+        });
       }
     }
   }
@@ -179,42 +179,47 @@ export const evaluate = async ({
     `Evaluating job ${event.jobExecutionId} for project ${event.projectId}`
   );
   // first, fetch all the context required for the evaluation
-  const job = await kyselyPrisma.$kysely
-    .selectFrom("job_executions")
-    .selectAll()
-    .where("id", "=", event.jobExecutionId)
-    .where("project_id", "=", event.projectId)
-    .executeTakeFirstOrThrow();
+  const job = await prisma.jobExecution.findFirstOrThrow({
+    where: {
+      id: event.jobExecutionId,
+      projectId: event.projectId,
+    },
+  });
 
-  if (!job?.job_input_trace_id) {
+  if (!job?.jobInputTraceId) {
     throw new ForbiddenError("Jobs can only be executed on traces for now.");
   }
 
   if (job.status === "CANCELLED") {
     logger.info(`Job ${job.id} for project ${event.projectId} was cancelled.`);
 
-    await kyselyPrisma.$kysely
-      .deleteFrom("job_executions")
-      .where("id", "=", job.id)
-      .where("project_id", "=", event.projectId)
-      .execute();
+    await prisma.jobExecution.delete({
+      where: {
+        id: job.id,
+        projectId: event.projectId,
+      },
+    });
 
     return;
   }
 
-  const config = await kyselyPrisma.$kysely
-    .selectFrom("job_configurations")
-    .selectAll()
-    .where("id", "=", job.job_configuration_id)
-    .where("project_id", "=", event.projectId)
-    .executeTakeFirstOrThrow();
+  const config = await prisma.jobConfiguration.findFirstOrThrow({
+    where: {
+      id: job.jobConfigurationId,
+      projectId: event.projectId,
+    },
+  });
 
-  const template = await kyselyPrisma.$kysely
-    .selectFrom("eval_templates")
-    .selectAll()
-    .where("id", "=", config.eval_template_id)
-    .where("project_id", "=", event.projectId)
-    .executeTakeFirstOrThrow();
+  if (!config.evalTemplateId) {
+    throw new InvalidRequestError("Eval template ID not found in job configuration");
+  }
+
+  const template = await prisma.evalTemplate.findFirstOrThrow({
+    where: {
+      id: config.evalTemplateId,
+      projectId: event.projectId,
+    },
+  });
 
   logger.info(
     `Evaluating job ${job.id} for project ${event.projectId} with template ${template.id}. Searching for context...`
@@ -222,14 +227,14 @@ export const evaluate = async ({
 
   // selectedcolumnid is not safe to use, needs validation in extractVariablesFromTrace()
   const parsedVariableMapping = variableMappingList.parse(
-    config.variable_mapping
+    config.variableMapping
   );
 
   // extract the variables which need to be inserted into the prompt
   const mappingResult = await extractVariablesFromTrace(
     event.projectId,
     template.vars,
-    job.job_input_trace_id,
+    job.jobInputTraceId,
     parsedVariableMapping
   );
 
@@ -251,7 +256,7 @@ export const evaluate = async ({
       score: z.string(),
       reasoning: z.string(),
     })
-    .parse(template.output_schema);
+    .parse(template.outputSchema);
 
   if (!parsedOutputSchema) {
     throw new InvalidRequestError("Output schema not found");
@@ -262,7 +267,7 @@ export const evaluate = async ({
     reasoning: z.string().describe(parsedOutputSchema.reasoning),
   });
 
-  const modelParams = ZodModelConfig.parse(template.model_params);
+  const modelParams = ZodModelConfig.parse(template.modelParams);
 
   // the apiKey.secret_key must never be printed to the console or returned to the client.
   const apiKey = await prisma.llmApiKeys.findFirst({
@@ -315,8 +320,8 @@ export const evaluate = async ({
   await prisma.score.create({
     data: {
       id: scoreId,
-      traceId: job.job_input_trace_id,
-      name: config.score_name,
+      traceId: job.jobInputTraceId,
+      name: config.scoreName,
       value: parsedLLMOutput.score,
       comment: parsedLLMOutput.reasoning,
       source: "EVAL",
@@ -325,16 +330,17 @@ export const evaluate = async ({
   });
 
   logger.info(
-    `Evaluating job ${event.jobExecutionId} persisted score ${scoreId} for trace ${job.job_input_trace_id}`
+    `Evaluating job ${event.jobExecutionId} persisted score ${scoreId} for trace ${job.jobInputTraceId}`
   );
 
-  await kyselyPrisma.$kysely
-    .updateTable("job_executions")
-    .set("status", sql`'COMPLETED'::"JobExecutionStatus"`)
-    .set("end_time", new Date())
-    .set("job_output_score_id", scoreId)
-    .where("id", "=", event.jobExecutionId)
-    .execute();
+  await prisma.jobExecution.update({
+    where: { id: event.jobExecutionId },
+    data: {
+      status: "COMPLETED",
+      endTime: new Date(),
+      jobOutputScoreId: scoreId,
+    },
+  });
 
   logger.info(
     `Eval job ${job.id} for project ${event.projectId} completed with score ${parsedLLMOutput.score}`
@@ -385,14 +391,15 @@ export async function extractVariablesFromTrace(
         continue;
       }
 
-      const trace = await kyselyPrisma.$kysely
-        .selectFrom("traces as t")
-        .select(
-          sql`${sql.raw(safeInternalColumn.internal)}`.as(safeInternalColumn.id)
-        ) // query the internal column name raw
-        .where("id", "=", traceId)
-        .where("project_id", "=", projectId)
-        .executeTakeFirst();
+      // Use raw SQL with the internal column name
+      const traceQuery = Prisma.sql`
+        SELECT ${Prisma.raw(safeInternalColumn.internal)} as "${Prisma.raw(safeInternalColumn.id)}"
+        FROM traces as t
+        WHERE id = ${traceId}
+        AND project_id = ${projectId}
+      `;
+      const traces = await prisma.$queryRaw<Array<Record<string, any>>>(traceQuery);
+      const trace = traces[0];
 
       // user facing errors
       if (!trace) {
@@ -430,16 +437,18 @@ export async function extractVariablesFromTrace(
         continue;
       }
 
-      const observation = await kyselyPrisma.$kysely
-        .selectFrom("observations as o")
-        .select(
-          sql`${sql.raw(safeInternalColumn.internal)}`.as(safeInternalColumn.id)
-        ) // query the internal column name raw
-        .where("trace_id", "=", traceId)
-        .where("project_id", "=", projectId)
-        .where("name", "=", mapping.objectName)
-        .orderBy("start_time", "desc")
-        .executeTakeFirst();
+      // Use raw SQL with the internal column name
+      const observationQuery = Prisma.sql`
+        SELECT ${Prisma.raw(safeInternalColumn.internal)} as "${Prisma.raw(safeInternalColumn.id)}"
+        FROM observations as o
+        WHERE trace_id = ${traceId}
+        AND project_id = ${projectId}
+        AND name = ${mapping.objectName}
+        ORDER BY start_time DESC
+        FETCH NEXT 1 ROWS ONLY
+      `;
+      const observations = await prisma.$queryRaw<Array<Record<string, any>>>(observationQuery);
+      const observation = observations[0];
 
       // user facing errors
       if (!observation) {

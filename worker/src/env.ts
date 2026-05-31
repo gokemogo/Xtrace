@@ -10,6 +10,7 @@ const EnvSchema = z.object({
     .default("development"),
   SENTRY_DSN: z.string().url().optional(),
   DATABASE_URL: z.string(),
+  DB_TYPE: z.enum(["postgresql", "dm8"]).default("postgresql"),
   WORKER_PORT: z.coerce
     .number({
       description:

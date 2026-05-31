@@ -1,7 +1,7 @@
 import { type z } from "zod";
 
 import { protectedProjectProcedure } from "@/src/server/api/trpc";
-import { paginationZod } from "@langfuse/shared";
+import { paginationZod, getDbType } from "@langfuse/shared";
 import {
   type ObservationView,
   Prisma,
@@ -39,10 +39,46 @@ export const getAllQuery = protectedProjectProcedure
     const { generations, datetimeFilter, filterCondition, searchCondition } =
       await getAllGenerations({ input, selectIOAndMetadata: false });
 
+    const dbType = getDbType();
     const totalGenerations = await ctx.prisma.$queryRaw<
       Array<{ count: bigint }>
     >(
-      Prisma.sql`
+      dbType === "dm8"
+        ? Prisma.sql`
+      SELECT
+        count(*)
+      FROM observations_view o
+      JOIN traces t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
+      LEFT JOIN prompts p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
+      LEFT JOIN (
+        SELECT
+          scores."trace_id",
+          scores."observation_id",
+          JSON_OBJECTAGG(scores.name VALUE CAST(avg_value AS DOUBLE PRECISION)) AS "scores_avg"
+        FROM (
+            SELECT
+              "trace_id",
+              "observation_id",
+              name,
+              avg(value) avg_value
+            FROM
+                scores
+            WHERE
+                scores."project_id" = ${input.projectId}
+                AND scores.value IS NOT NULL
+            GROUP BY
+                "trace_id", "observation_id", name
+        ) scores
+        GROUP BY scores."trace_id", scores."observation_id"
+      ) AS s_avg ON s_avg."trace_id" = t.id AND s_avg."observation_id" = o.id
+      WHERE
+        o.type = 'GENERATION'
+        AND o.project_id = ${input.projectId}
+        ${datetimeFilter}
+        ${searchCondition}
+        ${filterCondition}
+    `
+        : Prisma.sql`
       SELECT
         count(*)
       FROM observations_view o

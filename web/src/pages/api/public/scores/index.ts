@@ -15,6 +15,7 @@ import {
   PostScoresResponse,
   legacyFilterAndValidateV1GetScoreList,
 } from "@/src/features/public-api/types/scores";
+import { getDbType } from "@langfuse/shared";
 
 export default withMiddlewares({
   POST: createAuthedAPIRoute({
@@ -47,6 +48,7 @@ export default withMiddlewares({
     querySchema: GetScoresQuery,
     responseSchema: GetScoresResponse,
     fn: async ({ query, auth }) => {
+      const dbType = getDbType();
       const {
         page,
         limit,
@@ -67,7 +69,9 @@ export default withMiddlewares({
         ? Prisma.sql`AND s."config_id" = ${configId}`
         : Prisma.empty;
       const dataTypeCondition = dataType
-        ? Prisma.sql`AND s."data_type" = ${dataType}::"ScoreDataType"`
+        ? dbType === "dm8"
+          ? Prisma.sql`AND s."data_type" = CAST(${dataType} AS VARCHAR2(50))`
+          : Prisma.sql`AND s."data_type" = ${dataType}::"ScoreDataType"`
         : Prisma.empty;
       const userCondition = userId
         ? Prisma.sql`AND t."user_id" = ${userId}`
@@ -76,10 +80,14 @@ export default withMiddlewares({
         ? Prisma.sql`AND s."name" = ${name}`
         : Prisma.empty;
       const fromTimestampCondition = fromTimestamp
-        ? Prisma.sql`AND s."timestamp" >= ${fromTimestamp}::timestamp with time zone at time zone 'UTC'`
+        ? dbType === "dm8"
+          ? Prisma.sql`AND s."timestamp" >= CAST(${fromTimestamp} AS TIMESTAMP WITH TIME ZONE)`
+          : Prisma.sql`AND s."timestamp" >= ${fromTimestamp}::timestamp with time zone at time zone 'UTC'`
         : Prisma.empty;
       const toTimestampCondition = toTimestamp
-        ? Prisma.sql`AND s."timestamp" < ${toTimestamp}::timestamp with time zone at time zone 'UTC'`
+        ? dbType === "dm8"
+          ? Prisma.sql`AND s."timestamp" < CAST(${toTimestamp} AS TIMESTAMP WITH TIME ZONE)`
+          : Prisma.sql`AND s."timestamp" < ${toTimestamp}::timestamp with time zone at time zone 'UTC'`
         : Prisma.empty;
       const sourceCondition = source
         ? Prisma.sql`AND s."source" = ${source}`
@@ -89,41 +97,77 @@ export default withMiddlewares({
           ? Prisma.sql`AND s."value" ${Prisma.raw(`${operator}`)} ${value}`
           : Prisma.empty;
       const scoreIdCondition = scoreIds
-        ? Prisma.sql`AND s."id" = ANY(${scoreIds})`
+        ? dbType === "dm8"
+          ? Prisma.sql`AND s."id" IN (${Prisma.join(scoreIds.map(id => Prisma.sql`${id}`), ', ')})`
+          : Prisma.sql`AND s."id" = ANY(${scoreIds})`
         : Prisma.empty;
 
-      const scores = await prisma.$queryRaw<Array<unknown>>(Prisma.sql`
-          SELECT
-            s.id,
-            s.timestamp,
-            s.name,
-            s.value,
-            s.string_value as "stringValue",
-            s.author_user_id as "authorUserId",
-            s.project_id as "projectId",
-            s.created_at as "createdAt",  
-            s.updated_at as "updatedAt",  
-            s.source,
-            s.comment,
-            s.data_type as "dataType",
-            s.config_id as "configId",
-            s.trace_id as "traceId",
-            s.observation_id as "observationId",
-            json_build_object('userId', t.user_id) as "trace"
-          FROM "scores" AS s
-          LEFT JOIN "traces" AS t ON t.id = s.trace_id AND t.project_id = ${auth.scope.projectId}
-          WHERE s.project_id = ${auth.scope.projectId}
-          ${configCondition}
-          ${dataTypeCondition}
-          ${userCondition}
-          ${nameCondition}
-          ${sourceCondition}
-          ${fromTimestampCondition}
-          ${toTimestampCondition}
-          ${valueCondition}
-          ${scoreIdCondition}
-          ORDER BY s."timestamp" DESC
-          LIMIT ${limit} OFFSET ${skipValue}
+      const scores = await prisma.$queryRaw<Array<unknown>>(dbType === "dm8"
+        ? Prisma.sql`
+            SELECT
+              s.id,
+              s.timestamp,
+              s.name,
+              s.value,
+              s.string_value as "stringValue",
+              s.author_user_id as "authorUserId",
+              s.project_id as "projectId",
+              s.created_at as "createdAt",
+              s.updated_at as "updatedAt",
+              s.source,
+              s.comment,
+              s.data_type as "dataType",
+              s.config_id as "configId",
+              s.trace_id as "traceId",
+              s.observation_id as "observationId",
+              JSON_OBJECT('userId' VALUE t.user_id) as "trace"
+            FROM "scores" AS s
+            LEFT JOIN "traces" AS t ON t.id = s.trace_id AND t.project_id = ${auth.scope.projectId}
+            WHERE s.project_id = ${auth.scope.projectId}
+            ${configCondition}
+            ${dataTypeCondition}
+            ${userCondition}
+            ${nameCondition}
+            ${sourceCondition}
+            ${fromTimestampCondition}
+            ${toTimestampCondition}
+            ${valueCondition}
+            ${scoreIdCondition}
+            ORDER BY s."timestamp" DESC
+            OFFSET ${skipValue} ROWS FETCH NEXT ${limit} ROWS ONLY
+          `
+        : Prisma.sql`
+            SELECT
+              s.id,
+              s.timestamp,
+              s.name,
+              s.value,
+              s.string_value as "stringValue",
+              s.author_user_id as "authorUserId",
+              s.project_id as "projectId",
+              s.created_at as "createdAt",
+              s.updated_at as "updatedAt",
+              s.source,
+              s.comment,
+              s.data_type as "dataType",
+              s.config_id as "configId",
+              s.trace_id as "traceId",
+              s.observation_id as "observationId",
+              json_build_object('userId', t.user_id) as "trace"
+            FROM "scores" AS s
+            LEFT JOIN "traces" AS t ON t.id = s.trace_id AND t.project_id = ${auth.scope.projectId}
+            WHERE s.project_id = ${auth.scope.projectId}
+            ${configCondition}
+            ${dataTypeCondition}
+            ${userCondition}
+            ${nameCondition}
+            ${sourceCondition}
+            ${fromTimestampCondition}
+            ${toTimestampCondition}
+            ${valueCondition}
+            ${scoreIdCondition}
+            ORDER BY s."timestamp" DESC
+            LIMIT ${limit} OFFSET ${skipValue}
           `);
 
       const totalItemsRes = await prisma.$queryRaw<{ count: bigint }[]>(

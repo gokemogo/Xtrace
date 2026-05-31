@@ -1,0 +1,100 @@
+# ==================================================
+# DM8 (达梦数据库) Dockerfile
+# 用于构建 DM8 数据库镜像
+# ==================================================
+
+# 使用 CentOS 7 作为基础镜像（DM8 官方推荐）
+FROM centos:7
+
+# 设置标签
+LABEL maintainer="DeepTrace Team"
+LABEL description="DM8 Database Server"
+LABEL version="1.0"
+
+# 设置环境变量
+ENV DM_HOME=/opt/dmdbms
+ENV PATH=$DM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$DM_HOME/bin
+
+# 安装系统依赖
+RUN yum -y install \
+    gcc \
+    gcc-c++ \
+    make \
+    cmake \
+    gdb \
+    numactl \
+    glibc \
+    glibc-devel \
+    libaio \
+    libaio-devel \
+    readline \
+    readline-devel \
+    zlib \
+    zlib-devel \
+    openssl \
+    openssl-devel \
+    pam \
+    pam-devel \
+    libnsl \
+    && yum clean all
+
+# 创建 DM8 用户
+RUN groupadd dinstall && \
+    useradd -g dinstall -m -d /home/dmdba -s /bin/bash dmdba
+
+# 创建 DM8 安装目录
+RUN mkdir -p $DM_HOME && \
+    chown -R dmdba:dinstall $DM_HOME
+
+# 复制 DM8 安装包
+# 注意：需要将 DM8 安装包放在 build context 中
+COPY dm8_20250506_x86_rh6_rq_single.tar.gz /tmp/dm8.tar.gz
+
+# 解压安装包
+RUN cd /tmp && \
+    tar -xzf dm8.tar.gz && \
+    rm -f dm8.tar.gz
+
+# 切换到 dmdba 用户执行安装
+USER dmdba
+
+# 静默安装 DM8
+RUN cd /tmp/DMInstall && \
+    ./DMInstall.bin -i \
+    -d $DM_HOME \
+    -p $DM_HOME \
+    -t 0 \
+    -n ""
+
+# 切换回 root 用户
+USER root
+
+# 清理安装文件
+RUN rm -rf /tmp/DMInstall
+
+# 创建数据目录
+RUN mkdir -p $DM_HOME/data && \
+    chown -R dmdba:dinstall $DM_HOME/data
+
+# 复制初始化脚本
+COPY dm8_init.sql /opt/dmdbms/init.sql
+COPY dm8_seed_data.sql /opt/dmdbms/seed_data.sql
+COPY entrypoint.sh /opt/dmdbms/entrypoint.sh
+
+# 设置脚本权限
+RUN chmod +x /opt/dmdbms/entrypoint.sh
+
+# 暴露端口
+EXPOSE 5236
+
+# 设置数据卷
+VOLUME ["/opt/dmdbms/data"]
+
+# 健康检查
+HEALTHCHECK --interval=20s --timeout=10s --retries=15 --start-period=120s \
+    CMD /opt/dmdbms/bin/disql SYSDBA/${SYSDBA_PWD:-Deeptrace2025}@localhost:5236 -E "SELECT 1 FROM dual" || exit 1
+
+# 启动命令
+ENTRYPOINT ["/opt/dmdbms/entrypoint.sh"]
+CMD ["dmserver"]

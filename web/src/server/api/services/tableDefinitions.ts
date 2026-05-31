@@ -1,4 +1,4 @@
-import { type ColumnDefinition, type TableDefinitions } from "@langfuse/shared";
+import { type ColumnDefinition, type TableDefinitions, getDbType } from "@langfuse/shared";
 
 export const completionTokens = {
   name: "completionTokens",
@@ -52,8 +52,9 @@ export const duration = {
   name: "duration",
   id: "duration",
   type: "number",
-  internal:
-    'EXTRACT(EPOCH FROM o."end_time") - EXTRACT(EPOCH FROM o."start_time")',
+  internal: getDbType() === "dm8"
+    ? 'DATEDIFF(SECOND, o."start_time", o."end_time")'
+    : 'EXTRACT(EPOCH FROM o."end_time") - EXTRACT(EPOCH FROM o."start_time")',
 } as const;
 export const release = {
   name: "release",
@@ -149,19 +150,19 @@ const tracesColumns = [
 
 export const tableDefinitions: TableDefinitions = {
   traces: {
-    table: ` traces t`,
+    table: ` "traces" t`,
     columns: tracesColumns,
   },
   traces_observations: {
-    table: ` traces t LEFT JOIN observations o ON t.id = o.trace_id`,
+    table: ` "traces" t LEFT JOIN "observations" o ON t."id" = o."trace_id"`,
     columns: tracesObservationsColumns,
   },
   traces_observationsview: {
-    table: ` traces t LEFT JOIN observations_view o ON t.id = o.trace_id`,
+    table: ` "traces" t LEFT JOIN "observations_view" o ON t."id" = o."trace_id"`,
     columns: [...tracesObservationsColumns, calculatedTotalCost],
   },
   observations: {
-    table: ` observations_view o`,
+    table: ` "observations_view" o`,
     columns: [
       traceId,
       calculatedTotalCost,
@@ -189,7 +190,7 @@ export const tableDefinitions: TableDefinitions = {
     ],
   },
   traces_metrics: {
-    table: `traces_view t`,
+    table: `"traces_view" t`,
     columns: [
       ...tracesColumns,
       {
@@ -201,7 +202,7 @@ export const tableDefinitions: TableDefinitions = {
     ],
   },
   traces_scores: {
-    table: ` traces t JOIN scores s ON t.id = s.trace_id AND s.data_type != 'CATEGORICAL' AND t.project_id = s.project_id`,
+    table: ` "traces" t JOIN "scores" s ON t."id" = s."trace_id" AND s."data_type" != 'CATEGORICAL' AND t."project_id" = s."project_id"`,
     columns: [
       tracesProjectId,
       { name: "value", id: "value", type: "number", internal: 's."value"' },
@@ -223,7 +224,7 @@ export const tableDefinitions: TableDefinitions = {
   },
 
   traces_parent_observation_scores: {
-    table: ` traces t LEFT JOIN observations_view o on t."id" = o."trace_id" and o."parent_observation_id" is NULL AND t.project_id = o.project_id LEFT JOIN scores s ON t."id" = s."trace_id" AND t.project_id = s.project_id`,
+    table: ` "traces" t LEFT JOIN "observations_view" o ON t."id" = o."trace_id" AND o."parent_observation_id" IS NULL AND t."project_id" = o."project_id" LEFT JOIN "scores" s ON t."id" = s."trace_id" AND t."project_id" = s."project_id"`,
     columns: [
       {
         name: "projectId",

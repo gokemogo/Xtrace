@@ -5,6 +5,7 @@ import {
   tableColumnsToSqlFilter,
 } from "@langfuse/shared";
 import { Prisma, type PrismaClient } from "@langfuse/shared/src/db";
+import { getDbType } from "@langfuse/shared/src/db-adapter/factory";
 import Decimal from "decimal.js";
 import { type z } from "zod";
 import {
@@ -293,22 +294,59 @@ const createDateRangeCte = (
 
     // raw mandatory for temporal unit. From and to are parameterised values
     // temporal unit is typed
-    const cteString = Prisma.sql`
-      WITH date_series AS (
-        SELECT generate_series(${minDateColumn.value}, ${
-          maxDateColumn.value
-        }, '1 ${Prisma.raw(groupByColumn.temporalUnit)}') as date
-      )
-    `;
+    let cteString: Prisma.Sql;
+
+    if (getDbType() === "dm8") {
+      // DM8 不支持 generate_series，使用递归 CTE 生成日期序列
+      // 注意：DM8 要求递归 CTE 必须有列别名列表
+      const dateAddUnit = groupByColumn.temporalUnit === 'day' ? 'day' :
+                          groupByColumn.temporalUnit === 'hour' ? 'hour' : 'month';
+      cteString = Prisma.sql`
+        WITH date_series(date) AS (
+          SELECT CAST(${minDateColumn.value} AS TIMESTAMP)
+          UNION ALL
+          SELECT DATEADD(${Prisma.raw(dateAddUnit)}, 1, date)
+          FROM date_series
+          WHERE date < ${maxDateColumn.value}
+        )
+      `;
+    } else {
+      // PostgreSQL 使用 generate_series
+      cteString = Prisma.sql`
+        WITH date_series AS (
+          SELECT generate_series(${minDateColumn.value}, ${
+            maxDateColumn.value
+          }, '1 ${Prisma.raw(groupByColumn.temporalUnit)}') as date
+        )
+      `;
+    }
 
     // as above, raw is mandatory for columns and temporal unit
-    const modifiedFrom = Prisma.sql` FROM date_series LEFT JOIN ${getTableSql(
-      from,
-    )} ON DATE_TRUNC('${Prisma.raw(
-      groupByColumn.temporalUnit,
-    )}', ${getInternalSql(startColumn)}) = DATE_TRUNC('${Prisma.raw(
-      groupByColumn.temporalUnit,
-    )}', date_series."date")`;
+    let modifiedFrom: Prisma.Sql;
+
+    if (getDbType() === "dm8") {
+      // DM8 使用 TRUNC 函数替代 DATE_TRUNC
+      modifiedFrom = Prisma.sql` FROM date_series LEFT JOIN ${getTableSql(
+        from,
+      )} ON TRUNC(${getInternalSql(startColumn)}, '${Prisma.raw(
+        groupByColumn.temporalUnit === 'day' ? 'DD' :
+        groupByColumn.temporalUnit === 'hour' ? 'HH' :
+        groupByColumn.temporalUnit === 'month' ? 'MM' : 'DD'
+      )}') = TRUNC(date_series."date", '${Prisma.raw(
+        groupByColumn.temporalUnit === 'day' ? 'DD' :
+        groupByColumn.temporalUnit === 'hour' ? 'HH' :
+        groupByColumn.temporalUnit === 'month' ? 'MM' : 'DD'
+      )}')`;
+    } else {
+      // PostgreSQL 使用 DATE_TRUNC
+      modifiedFrom = Prisma.sql` FROM date_series LEFT JOIN ${getTableSql(
+        from,
+      )} ON DATE_TRUNC('${Prisma.raw(
+        groupByColumn.temporalUnit,
+      )}', ${getInternalSql(startColumn)}) = DATE_TRUNC('${Prisma.raw(
+        groupByColumn.temporalUnit,
+      )}', date_series."date")`;
+    }
 
     return { cte: cteString, from: modifiedFrom, column: startColumn };
   }

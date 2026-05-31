@@ -333,18 +333,18 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
                   image: dbUser.image,
                   admin: dbUser.admin,
                   emailVerified: dbUser.emailVerified?.toISOString(),
-                  projects: dbUser.projectMemberships.map((membership) => ({
-                    id: membership.project.id,
-                    name: membership.project.name,
+                  projects: dbUser.projectMemberships?.map((membership) => ({
+                    id: membership.project?.id,
+                    name: membership.project?.name,
                     role: membership.role,
                     cloudConfig: {
                       defaultLookBackDays:
                         cloudConfigSchema
                           .nullish()
-                          .parse(membership.project.cloudConfig)
+                          .parse(membership.project?.cloudConfig)
                           ?.defaultLookBackDays ?? null,
                     },
-                  })),
+                  })) ?? [],
                   featureFlags: parseFlags(dbUser.featureFlags),
                 }
               : null,

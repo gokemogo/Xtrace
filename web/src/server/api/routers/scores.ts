@@ -11,7 +11,7 @@ import {
   UpdateAnnotationScoreData,
   paginationZod,
 } from "@langfuse/shared";
-import { singleFilter } from "@langfuse/shared";
+import { singleFilter, getDbType } from "@langfuse/shared";
 import {
   tableColumnsToSqlFilterAndPrefix,
   orderByToPrismaSql,
@@ -303,6 +303,21 @@ const generateScoresQuery = (
   limit: number,
   page: number,
 ) => {
+  const dbType = getDbType();
+  if (dbType === "dm8") {
+    return Prisma.sql`
+    SELECT
+     ${select}
+    FROM scores s
+    LEFT JOIN traces t ON t.id = s.trace_id AND t.project_id = ${projectId}
+    LEFT JOIN job_executions je ON je.job_output_score_id = s.id AND je.project_id = ${projectId}
+    LEFT JOIN users u ON u.id = s.author_user_id
+    WHERE s.project_id = ${projectId}
+    ${filterCondition}
+    ${orderCondition}
+    OFFSET ${page * limit} ROWS FETCH NEXT ${limit} ROWS ONLY
+  `;
+  }
   return Prisma.sql`
   SELECT
    ${select}

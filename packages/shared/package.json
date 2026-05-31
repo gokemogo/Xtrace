@@ -17,6 +17,14 @@
       "import": "./dist/src/db.js",
       "require": "./dist/src/db.js"
     },
+    "./src/db-adapter": {
+      "import": "./dist/src/db-adapter/index.js",
+      "require": "./dist/src/db-adapter/index.js"
+    },
+    "./src/db-adapter/factory": {
+      "import": "./dist/src/db-adapter/factory.js",
+      "require": "./dist/src/db-adapter/factory.js"
+    },
     "./src/server": {
       "import": "./dist/src/server/index.js",
       "require": "./dist/src/server/index.js"
@@ -24,6 +32,10 @@
     "./encryption": {
       "import": "./dist/src/encryption/index.js",
       "require": "./dist/src/encryption/index.js"
+    },
+    "./src/queue": {
+      "import": "./dist/src/queue/index.js",
+      "require": "./dist/src/queue/index.js"
     }
   },
   "scripts": {
@@ -55,6 +67,8 @@
     "@react-email/render": "^0.0.15",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^2.4.3",
+    "dmdb": "^1.0.49630",
+    "ioredis": "^5.4.1",
     "kysely": "^0.27.3",
     "langchain": "^0.2.6",
     "lodash": "^4.17.21",

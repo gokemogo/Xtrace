@@ -70,3 +70,7 @@ python-test
 *.tar
 restart.sh
 docs/
+.env
+.env.dm8
+.env.docker
+.env.external-db

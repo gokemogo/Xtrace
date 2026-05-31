@@ -6,6 +6,7 @@ import {
 import { withMiddlewares } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedAPIRoute } from "@/src/features/public-api/server/createAuthedAPIRoute";
 import { type z } from "zod";
+import { getDbType } from "@langfuse/shared";
 
 export default withMiddlewares({
   GET: createAuthedAPIRoute({
@@ -13,6 +14,7 @@ export default withMiddlewares({
     querySchema: GetMetricsDailyV1Query,
     responseSchema: GetMetricsDailyV1Response,
     fn: async ({ query, auth }) => {
+      const dbType = getDbType();
       // 构建 WHERE 条件列表
       const whereConditions = [
         Prisma.sql`t.project_id = ${auth.scope.projectId}`,
@@ -26,88 +28,172 @@ export default withMiddlewares({
       }
       if (query.tags) {
         const tagsArray = Array.isArray(query.tags) ? query.tags : [query.tags];
-        whereConditions.push(
-          Prisma.sql`ARRAY[${Prisma.join(tagsArray)}] <@ t."tags"`,
-        );
+        if (dbType === "dm8") {
+          whereConditions.push(
+            Prisma.sql`EXISTS (SELECT 1 FROM JSON_TABLE(t."tags", '$[*]' COLUMNS (tag VARCHAR2(4000) PATH '$')) jt WHERE jt.tag IN (${Prisma.join(tagsArray)}))`,
+          );
+        } else {
+          whereConditions.push(
+            Prisma.sql`ARRAY[${Prisma.join(tagsArray)}] <@ t."tags"`,
+          );
+        }
       }
       if (query.fromTimestamp) {
-        whereConditions.push(
-          Prisma.sql`t."timestamp" >= ${query.fromTimestamp}::timestamptz`,
-        );
+        if (dbType === "dm8") {
+          whereConditions.push(
+            Prisma.sql`t."timestamp" >= CAST(${query.fromTimestamp} AS TIMESTAMP WITH TIME ZONE)`,
+          );
+        } else {
+          whereConditions.push(
+            Prisma.sql`t."timestamp" >= ${query.fromTimestamp}::timestamptz`,
+          );
+        }
       }
       if (query.toTimestamp) {
-        whereConditions.push(
-          Prisma.sql`t."timestamp" < ${query.toTimestamp}::timestamptz`,
-        );
+        if (dbType === "dm8") {
+          whereConditions.push(
+            Prisma.sql`t."timestamp" < CAST(${query.toTimestamp} AS TIMESTAMP WITH TIME ZONE)`,
+          );
+        } else {
+          whereConditions.push(
+            Prisma.sql`t."timestamp" < ${query.toTimestamp}::timestamptz`,
+          );
+        }
       }
 
       const whereClause = Prisma.join(whereConditions, " AND ");
 
       const [usage, totalItemsRes] = await Promise.all([
-        prisma.$queryRaw(
-          Prisma.sql`
-      WITH model_usage AS (
-        SELECT
-          DATE_TRUNC('DAY', o.start_time) "date",
-          o.model,
-          count(distinct o.id)::integer as "countObservations",
-          count(distinct t.id)::integer as "countTraces",
-          SUM(o.prompt_tokens) "inputUsage",
-          SUM(o.completion_tokens) "outputUsage",
-          SUM(o.total_tokens) "totalUsage",
-          COALESCE(SUM(o.calculated_total_cost), 0)::DOUBLE PRECISION as "totalCost"
-        FROM traces t
-        LEFT JOIN observations_view o ON o.trace_id = t.id AND o.project_id = t.project_id
-        WHERE o.start_time IS NOT NULL
-          AND ${whereClause}
-        GROUP BY 1, 2
-        ORDER BY 1, 2
-      ),
-      daily_model_usage AS (
-        SELECT
-          "date",
-          json_agg(json_build_object(
-            'model', model,
-            'inputUsage', "inputUsage",
-            'outputUsage', "outputUsage",
-            'totalUsage', "totalUsage",
-            'totalCost', "totalCost",
-            'countObservations', "countObservations",
-            'countTraces', "countTraces"
-          )) daily_usage_json
-        FROM model_usage
-        GROUP BY 1
-      ),
-      daily_stats AS (
-        SELECT
-          DATE_TRUNC('DAY', t.timestamp) "date",
-          count(distinct t.id)::integer count_traces,
-          count(distinct o.id)::integer count_observations,
-          SUM(o.calculated_total_cost)::DOUBLE PRECISION total_cost
-        FROM traces t
-        LEFT JOIN observations_view o ON o.project_id = t.project_id AND t.id = o.trace_id
-        WHERE ${whereClause}
-        GROUP BY 1
-      )
-      SELECT
-        TO_CHAR(COALESCE(ds.date, daily_model_usage.date), 'YYYY-MM-DD') AS "date",
-        COALESCE(count_traces, 0) "countTraces",
-        COALESCE(count_observations, 0) "countObservations",
-        COALESCE(total_cost, 0) "totalCost",
-        COALESCE(daily_usage_json, '[]'::JSON) usage
-      FROM daily_stats ds
-      FULL OUTER JOIN daily_model_usage ON daily_model_usage.date = ds.date
-      ORDER BY 1 DESC
-      LIMIT ${query.limit} OFFSET ${(query.page - 1) * query.limit}
-    `,
-        ),
-        prisma.$queryRaw<{ count: number }[]>(
-          Prisma.sql`
-      SELECT COUNT(DISTINCT DATE_TRUNC('DAY', t.timestamp))::integer
-      FROM traces t
-      WHERE ${whereClause}
-    `,
-        ),
+        dbType === "dm8"
+          ? prisma.$queryRaw(
+              Prisma.sql`
+          WITH model_usage AS (
+            SELECT
+              TRUNC(o.start_time, 'DD') "date",
+              o.model,
+              count(distinct o.id) as "countObservations",
+              count(distinct t.id) as "countTraces",
+              SUM(o.prompt_tokens) "inputUsage",
+              SUM(o.completion_tokens) "outputUsage",
+              SUM(o.total_tokens) "totalUsage",
+              COALESCE(SUM(o.calculated_total_cost), 0) as "totalCost"
+            FROM traces t
+            LEFT JOIN observations_view o ON o.trace_id = t.id AND o.project_id = t.project_id
+            WHERE o.start_time IS NOT NULL
+              AND ${whereClause}
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+          ),
+          daily_model_usage AS (
+            SELECT
+              "date",
+              JSON_ARRAYAGG(JSON_OBJECT(
+                'model' VALUE model,
+                'inputUsage' VALUE "inputUsage",
+                'outputUsage' VALUE "outputUsage",
+                'totalUsage' VALUE "totalUsage",
+                'totalCost' VALUE "totalCost",
+                'countObservations' VALUE "countObservations",
+                'countTraces' VALUE "countTraces"
+              )) daily_usage_json
+            FROM model_usage
+            GROUP BY 1
+          ),
+          daily_stats AS (
+            SELECT
+              TRUNC(t.timestamp, 'DD') "date",
+              count(distinct t.id) count_traces,
+              count(distinct o.id) count_observations,
+              SUM(o.calculated_total_cost) total_cost
+            FROM traces t
+            LEFT JOIN observations_view o ON o.project_id = t.project_id AND t.id = o.trace_id
+            WHERE ${whereClause}
+            GROUP BY 1
+          )
+          SELECT
+            TO_CHAR(COALESCE(ds.date, daily_model_usage.date), 'YYYY-MM-DD') AS "date",
+            COALESCE(count_traces, 0) "countTraces",
+            COALESCE(count_observations, 0) "countObservations",
+            COALESCE(total_cost, 0) "totalCost",
+            COALESCE(daily_usage_json, '[]') usage
+          FROM daily_stats ds
+          FULL OUTER JOIN daily_model_usage ON daily_model_usage.date = ds.date
+          ORDER BY 1 DESC
+          OFFSET ${(query.page - 1) * query.limit} ROWS FETCH NEXT ${query.limit} ROWS ONLY
+        `,
+            )
+          : prisma.$queryRaw(
+              Prisma.sql`
+          WITH model_usage AS (
+            SELECT
+              DATE_TRUNC('DAY', o.start_time) "date",
+              o.model,
+              count(distinct o.id)::integer as "countObservations",
+              count(distinct t.id)::integer as "countTraces",
+              SUM(o.prompt_tokens) "inputUsage",
+              SUM(o.completion_tokens) "outputUsage",
+              SUM(o.total_tokens) "totalUsage",
+              COALESCE(SUM(o.calculated_total_cost), 0)::DOUBLE PRECISION as "totalCost"
+            FROM traces t
+            LEFT JOIN observations_view o ON o.trace_id = t.id AND o.project_id = t.project_id
+            WHERE o.start_time IS NOT NULL
+              AND ${whereClause}
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+          ),
+          daily_model_usage AS (
+            SELECT
+              "date",
+              json_agg(json_build_object(
+                'model', model,
+                'inputUsage', "inputUsage",
+                'outputUsage', "outputUsage",
+                'totalUsage', "totalUsage",
+                'totalCost', "totalCost",
+                'countObservations', "countObservations",
+                'countTraces', "countTraces"
+              )) daily_usage_json
+            FROM model_usage
+            GROUP BY 1
+          ),
+          daily_stats AS (
+            SELECT
+              DATE_TRUNC('DAY', t.timestamp) "date",
+              count(distinct t.id)::integer count_traces,
+              count(distinct o.id)::integer count_observations,
+              SUM(o.calculated_total_cost)::DOUBLE PRECISION total_cost
+            FROM traces t
+            LEFT JOIN observations_view o ON o.project_id = t.project_id AND t.id = o.trace_id
+            WHERE ${whereClause}
+            GROUP BY 1
+          )
+          SELECT
+            TO_CHAR(COALESCE(ds.date, daily_model_usage.date), 'YYYY-MM-DD') AS "date",
+            COALESCE(count_traces, 0) "countTraces",
+            COALESCE(count_observations, 0) "countObservations",
+            COALESCE(total_cost, 0) "totalCost",
+            COALESCE(daily_usage_json, '[]'::JSON) usage
+          FROM daily_stats ds
+          FULL OUTER JOIN daily_model_usage ON daily_model_usage.date = ds.date
+          ORDER BY 1 DESC
+          LIMIT ${query.limit} OFFSET ${(query.page - 1) * query.limit}
+        `,
+            ),
+        dbType === "dm8"
+          ? prisma.$queryRaw<{ count: number }[]>(
+              Prisma.sql`
+          SELECT COUNT(DISTINCT TRUNC(t.timestamp, 'DD'))
+          FROM traces t
+          WHERE ${whereClause}
+        `,
+            )
+          : prisma.$queryRaw<{ count: number }[]>(
+              Prisma.sql`
+          SELECT COUNT(DISTINCT DATE_TRUNC('DAY', t.timestamp))::integer
+          FROM traces t
+          WHERE ${whereClause}
+        `,
+            ),
       ]);
 
       const totalItems = totalItemsRes[0]?.count ?? 0;

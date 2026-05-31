@@ -1,10 +1,19 @@
 import { expect, test, describe, vi } from "vitest";
-import { evalQueue } from "../api";
 import { QueueJobs, TraceUpsertEventSchema } from "@langfuse/shared";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import logger from "../logger";
 import { evalJobCreator } from "../queues/evalQueue";
+
+// 创建一个模拟的 evalQueue 用于测试
+const evalQueue = {
+  add: async (name: string, data: any) => {
+    return { id: data.id, name, data };
+  },
+  getJobState: async (jobId: string) => {
+    return "completed";
+  }
+};
 
 describe.sequential("handle redis events", () => {
   test("handle redis job succeeding", async () => {

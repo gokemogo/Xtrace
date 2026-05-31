@@ -4,6 +4,7 @@ import {
   datetimeFilterToPrismaSql,
   timeFilter,
   type ObservationOptions,
+  getDbType,
 } from "@langfuse/shared";
 import { protectedProjectProcedure } from "@/src/server/api/trpc";
 import { Prisma } from "@langfuse/shared/src/db";
@@ -66,12 +67,27 @@ export const filterOptionsQuery = protectedProjectProcedure
         name: "desc",
       },
     });
+    const dbType = getDbType();
     const promptNames = await ctx.prisma.$queryRaw<
       Array<{
         promptName: string | null;
         count: number;
       }>
-    >(Prisma.sql`
+    >(dbType === "dm8"
+      ? Prisma.sql`
+        SELECT
+          p.name "promptName",
+          CAST(count(*) AS INTEGER) AS count
+        FROM prompts p
+        JOIN observations o ON o.prompt_id = p.id
+        WHERE o.type = 'GENERATION'
+          AND o.project_id = ${input.projectId}
+          AND o.prompt_id IS NOT NULL
+          AND p.project_id = ${input.projectId}
+        GROUP BY 1
+        FETCH NEXT 1000 ROWS ONLY
+      `
+      : Prisma.sql`
         SELECT
           p.name "promptName",
           count(*)::int AS count
@@ -100,7 +116,21 @@ export const filterOptionsQuery = protectedProjectProcedure
         traceName: string | null;
         count: number;
       }>
-    >(Prisma.sql`
+    >(dbType === "dm8"
+      ? Prisma.sql`
+        SELECT
+          t.name "traceName",
+          CAST(count(*) AS INTEGER) AS count
+        FROM traces t
+        JOIN observations o ON o.trace_id = t.id
+        WHERE o.type = 'GENERATION'
+          AND o.project_id = ${input.projectId}
+          AND t.project_id = ${input.projectId}
+          ${rawStartTimeFilter}
+        GROUP BY 1
+        FETCH NEXT 1000 ROWS ONLY
+      `
+      : Prisma.sql`
         SELECT
           t.name "traceName",
           count(*)::int AS count

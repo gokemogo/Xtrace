@@ -17,6 +17,7 @@ import {
   orderBy,
   singleFilter,
   tableColumnsToSqlFilterAndPrefix,
+  getDbType,
 } from "@langfuse/shared";
 import { LATEST_PROMPT_LABEL } from "@/src/features/prompts/constants";
 
@@ -97,13 +98,43 @@ export const promptRouter = createTRPCRouter({
     )
     .query(async ({ input, ctx }) => {
       if (input.promptNames.length === 0) return [];
+      const dbType = getDbType();
       const promptCounts = await ctx.prisma.$queryRaw<
         {
           promptName: string;
           observationCount: bigint;
         }[]
       >(
-        Prisma.sql`
+        dbType === "dm8"
+          ? Prisma.sql`
+              WITH prompt_ids AS (
+                SELECT
+                  p.id,
+                  p.name
+                FROM
+                  prompts p
+                WHERE
+                  p.project_id = ${input.projectId}
+                  AND p.name IN (${Prisma.join(input.promptNames)})
+              )
+              SELECT
+                p.name AS "promptName", SUM(oc.observation_count) AS "observationCount"
+              FROM
+                prompt_ids p
+                LEFT JOIN (
+                  SELECT
+                    o.prompt_id,
+                    COUNT(*) AS observation_count
+                  FROM
+                    observations o
+                  WHERE
+                    o.project_id = ${input.projectId}
+                  GROUP BY o.prompt_id
+                ) oc ON oc.prompt_id = p.id
+              GROUP BY
+                p.name
+        `
+          : Prisma.sql`
               WITH prompt_ids AS (
                 SELECT
                   p.id,
@@ -213,15 +244,28 @@ export const promptRouter = createTRPCRouter({
           id: true,
         },
       });
-      const tags: { count: number; value: string }[] = await ctx.prisma
-        .$queryRaw`
+      const dbType = getDbType();
+      const tags: { count: number; value: string }[] = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw`
+        SELECT CAST(COUNT(*) AS INTEGER) AS "count", jt.tag as value
+        FROM prompts, JSON_TABLE(prompts.tags, '$[*]' COLUMNS (tag VARCHAR2(4000) PATH '$')) jt
+        WHERE prompts.project_id = ${input.projectId}
+        GROUP BY jt.tag
+      `
+        : await ctx.prisma.$queryRaw`
         SELECT COUNT(*)::integer AS "count", tags.tag as value
         FROM prompts, UNNEST(prompts.tags) AS tags(tag)
         WHERE prompts.project_id = ${input.projectId}
         GROUP BY tags.tag;
       `;
-      const labels: { count: number; value: string }[] = await ctx.prisma
-        .$queryRaw`
+      const labels: { count: number; value: string }[] = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw`
+      SELECT CAST(COUNT(*) AS INTEGER) AS "count", jl.label as value
+      FROM prompts, JSON_TABLE(prompts.labels, '$[*]' COLUMNS (label VARCHAR2(4000) PATH '$')) jl
+      WHERE prompts.project_id = ${input.projectId}
+      GROUP BY jl.label
+    `
+        : await ctx.prisma.$queryRaw`
       SELECT COUNT(*)::integer AS "count", labels.label as value
       FROM prompts, UNNEST(prompts.labels) AS labels(label)
       WHERE prompts.project_id = ${input.projectId}
@@ -454,10 +498,18 @@ export const promptRouter = createTRPCRouter({
         scope: "prompts:read",
       });
 
-      const labels = await ctx.prisma.$queryRaw<{ label: string }[]>`
+      const dbType = getDbType();
+      const labels = dbType === "dm8"
+        ? await ctx.prisma.$queryRaw<{ label: string }[]>`
+        SELECT DISTINCT jt.label AS label
+        FROM prompts, JSON_TABLE(prompts.labels, '$[*]' COLUMNS (label VARCHAR2(4000) PATH '$')) jt
+        WHERE project_id = ${input.projectId}
+        AND labels IS NOT NULL
+      `
+        : await ctx.prisma.$queryRaw<{ label: string }[]>`
         SELECT DISTINCT UNNEST(labels) AS label
         FROM prompts
-        WHERE project_id = ${input.projectId}      
+        WHERE project_id = ${input.projectId}
         AND labels IS NOT NULL;
       `;
 
@@ -581,6 +633,7 @@ export const promptRouter = createTRPCRouter({
 
       if (input.promptIds.length === 0) return [];
 
+      const dbType = getDbType();
       const metrics = await ctx.prisma.$queryRaw<
         Array<{
           id: string;
@@ -593,7 +646,31 @@ export const promptRouter = createTRPCRouter({
           medianLatency: number | null;
         }>
       >(
-        Prisma.sql`
+        dbType === "dm8"
+          ? Prisma.sql`
+        select p.id, p.version, observation_metrics.* from prompts p
+        LEFT JOIN (
+          SELECT
+            ov.prompt_id,
+            count(*) AS "observationCount",
+            MIN(ov.start_time) AS "firstUsed",
+            MAX(ov.start_time) AS "lastUsed",
+            PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY ov.completion_tokens) AS "medianOutputTokens",
+            PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY ov.prompt_tokens) AS "medianInputTokens",
+            PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY ov.calculated_total_cost) AS "medianTotalCost",
+            PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY ov.latency) AS "medianLatency"
+          FROM
+            "observations_view" ov
+          WHERE
+            "type" = 'GENERATION'
+            AND "project_id" = ${input.projectId}
+          GROUP BY ov.prompt_id
+        ) AS observation_metrics ON observation_metrics.prompt_id = p.id
+        WHERE "project_id" = ${input.projectId}
+        AND p.id in (${Prisma.join(input.promptIds)})
+        ORDER BY version DESC
+    `
+          : Prisma.sql`
         select p.id, p.version, observation_metrics.* from prompts p
         LEFT JOIN LATERAL (
           SELECT
@@ -623,7 +700,41 @@ export const promptRouter = createTRPCRouter({
           scores: Record<string, number>;
         }>
       >(
-        Prisma.sql` 
+        dbType === "dm8"
+          ? Prisma.sql`
+        WITH avg_scores_by_prompt AS (
+          SELECT
+              o.prompt_id AS prompt_id,
+              s.name AS score_name,
+              AVG(s.value) AS average_score_value
+          FROM observations AS o
+          JOIN prompts AS p ON o.prompt_id = p.id AND p.project_id = ${input.projectId}
+          LEFT JOIN scores s ON o.trace_id = s.trace_id AND s.observation_id = o.id AND s.project_id = ${input.projectId}
+          WHERE
+              o.type = 'GENERATION'
+              AND s.data_type != 'CATEGORICAL'
+              AND s.value IS NOT NULL
+              AND o.prompt_id IS NOT NULL
+              AND o.project_id = ${input.projectId}
+              AND p.id IN (${Prisma.join(input.promptIds)})
+          GROUP BY 1,2
+          ORDER BY 1,2
+        ),
+        json_avg_scores_by_prompt_id AS (
+          SELECT
+            prompt_id,
+            JSON_OBJECTAGG(score_name VALUE average_score_value) AS scores
+          FROM
+          avg_scores_by_prompt AS avgs
+          WHERE
+            avgs.score_name IS NOT NULL
+            AND avgs.average_score_value IS NOT NULL
+          GROUP BY prompt_id
+          ORDER BY prompt_id
+        )
+        SELECT *
+        FROM json_avg_scores_by_prompt_id`
+          : Prisma.sql`
         WITH avg_scores_by_prompt AS (
           SELECT
               o.prompt_id AS prompt_id,
@@ -649,13 +760,13 @@ export const promptRouter = createTRPCRouter({
             average_score_value) AS scores
           FROM
           avg_scores_by_prompt AS avgs
-          WHERE 
-            avgs.score_name IS NOT NULL 
+          WHERE
+            avgs.score_name IS NOT NULL
             AND avgs.average_score_value IS NOT NULL
           GROUP BY prompt_id
           ORDER BY prompt_id
         )
-        SELECT * 
+        SELECT *
         FROM json_avg_scores_by_prompt_id`,
       );
 
@@ -665,7 +776,8 @@ export const promptRouter = createTRPCRouter({
           scores: Record<string, number>;
         }>
       >(
-        Prisma.sql`
+        dbType === "dm8"
+          ? Prisma.sql`
         WITH traces_by_prompt_id AS (
           SELECT
             o.prompt_id,
@@ -691,15 +803,69 @@ export const promptRouter = createTRPCRouter({
             traces_by_prompt_id tp
           JOIN prompts AS p ON tp.prompt_id = p.id AND p.project_id = ${input.projectId}
           LEFT JOIN scores s ON tp.trace_id = s.trace_id AND s.observation_id IS NULL AND s.project_id = ${input.projectId}
-          WHERE 
+          WHERE
               s.data_type != 'CATEGORICAL'
               AND s.value IS NOT NULL
         ), average_scores_by_prompt AS (
-          SELECT 
+          SELECT
               prompt_id,
               score_name,
               AVG(score_value) AS average_score_value
-          FROM 
+          FROM
+              scores_by_trace
+          GROUP BY 1,2
+        ), json_avg_scores_by_prompt_id AS (
+          SELECT
+            prompt_id,
+            JSON_OBJECTAGG(score_name VALUE average_score_value) AS scores
+          FROM
+            average_scores_by_prompt
+          WHERE
+            score_name IS NOT NULL
+            AND average_score_value IS NOT NULL
+          GROUP BY
+            prompt_id
+          ORDER BY
+            prompt_id
+        )
+        SELECT *
+        FROM json_avg_scores_by_prompt_id
+        `
+          : Prisma.sql`
+        WITH traces_by_prompt_id AS (
+          SELECT
+            o.prompt_id,
+            o.trace_id
+          FROM
+            observations o
+          WHERE
+            o.prompt_id IS NOT NULL
+            AND o.type = 'GENERATION'
+            AND o.project_id = ${input.projectId}
+            AND o.prompt_id IN (${Prisma.join(input.promptIds)})
+          GROUP BY
+            o.prompt_id,
+            o.trace_id
+        ), scores_by_trace AS (
+          SELECT
+              tp.prompt_id,
+              tp.trace_id,
+              p.version,
+              s.name AS score_name,
+              s.value AS score_value
+          FROM
+            traces_by_prompt_id tp
+          JOIN prompts AS p ON tp.prompt_id = p.id AND p.project_id = ${input.projectId}
+          LEFT JOIN scores s ON tp.trace_id = s.trace_id AND s.observation_id IS NULL AND s.project_id = ${input.projectId}
+          WHERE
+              s.data_type != 'CATEGORICAL'
+              AND s.value IS NOT NULL
+        ), average_scores_by_prompt AS (
+          SELECT
+              prompt_id,
+              score_name,
+              AVG(score_value) AS average_score_value
+          FROM
               scores_by_trace
           GROUP BY 1,2
         ), json_avg_scores_by_prompt_id AS (
@@ -709,15 +875,15 @@ export const promptRouter = createTRPCRouter({
             average_score_value) AS scores
           FROM
             average_scores_by_prompt
-          WHERE 
-            score_name IS NOT NULL 
+          WHERE
+            score_name IS NOT NULL
             AND average_score_value IS NOT NULL
           GROUP BY
             prompt_id
           ORDER BY
             prompt_id
         )
-        SELECT * 
+        SELECT *
         FROM json_avg_scores_by_prompt_id
         `,
       );
@@ -742,6 +908,25 @@ const generatePromptQuery = (
   limit: number,
   page: number,
 ) => {
+  const dbType = getDbType();
+  if (dbType === "dm8") {
+    return Prisma.sql`
+    SELECT
+     ${select}
+     FROM prompts p
+     WHERE (name, version) IN (
+      SELECT name, MAX(version)
+       FROM prompts p
+       WHERE "project_id" = ${projectId}
+       ${filterCondition}
+            GROUP BY name
+          )
+      AND "project_id" = ${projectId}
+    ${filterCondition}
+    ${orderCondition}
+    OFFSET ${page * limit} ROWS FETCH NEXT ${limit} ROWS ONLY
+  `;
+  }
   return Prisma.sql`
   SELECT
    ${select}

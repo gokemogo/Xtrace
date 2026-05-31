@@ -33,3 +33,10 @@ export { type DB } from "../prisma/generated/types";
 // errors
 export * from "./errors/index";
 // export * from "./domain";
+
+// database adapter
+export * from "./db-adapter";
+
+// cache
+export * from "./cache";
+export { RedisCache, getRedisCache, initRedisCache } from "./redis-cache";

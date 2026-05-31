@@ -1,0 +1,74 @@
+# ==================================================
+# 连接外部数据库的 Docker Compose 配置
+# 当 DM8 和 TongRDS 由其他人部署时使用此配置
+# ==================================================
+
+version: "3.5"
+
+services:
+  # Langfuse Web 应用
+  langfuse-web:
+    build:
+      context: ..
+      dockerfile: Dockerfile.dm8
+    container_name: langfuse-web
+    ports:
+      - "3000:3000"
+    environment:
+      # 数据库类型
+      - DB_TYPE=dm8
+
+      # DM8 数据库连接（替换为实际信息）
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@192.168.1.100:5236
+
+      # TongRDS 连接（替换为实际信息）
+      - REDIS_HOST=192.168.1.101
+      - REDIS_PORT=6379
+      - REDIS_AUTH=your_redis_password_here
+
+      # 应用配置
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=secret
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      - SALT=salt
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
+      - NODE_ENV=development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Langfuse Worker 服务
+  langfuse-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile.dm8
+    container_name: langfuse-worker
+    command: ["node", "worker/dist/src/app.js"]
+    environment:
+      # 数据库类型
+      - DB_TYPE=dm8
+
+      # DM8 数据库连接（替换为实际信息）
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@192.168.1.100:5236
+
+      # TongRDS 连接（替换为实际信息）
+      - REDIS_HOST=192.168.1.101
+      - REDIS_PORT=6379
+      - REDIS_AUTH=your_redis_password_here
+
+      # 应用配置
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - NODE_ENV=development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    depends_on:
+      langfuse-web:
+        condition: service_healthy

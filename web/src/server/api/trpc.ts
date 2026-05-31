@@ -19,6 +19,7 @@ import { type Session } from "next-auth";
 
 import { getServerAuthSession } from "@/src/server/auth";
 import { prisma } from "@langfuse/shared/src/db";
+import { getAdapter, type IDatabaseAdapter } from "@langfuse/shared/src/db-adapter";
 import * as Sentry from "@sentry/node";
 import * as z from "zod";
 
@@ -40,6 +41,7 @@ export const createInnerTRPCContext = (opts: CreateContextOptions) => {
   return {
     session: opts.session,
     prisma,
+    adapter: getAdapter(),
     DB,
   };
 };

@@ -12,7 +12,7 @@ import {
 import { throwIfNoAccess } from "@/src/features/rbac/utils/checkAccess";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { DB } from "@/src/server/db";
-import { paginationZod } from "@langfuse/shared";
+import { paginationZod, getDbType } from "@langfuse/shared";
 import { filterAndValidateDbScoreList } from "@/src/features/public-api/types/scores";
 
 export const datasetRouter = createTRPCRouter({
@@ -128,6 +128,7 @@ export const datasetRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }) => {
+      const dbType = getDbType();
       const runs = await ctx.prisma.$queryRaw<
         Array<
           DatasetRuns & {
@@ -137,7 +138,8 @@ export const datasetRouter = createTRPCRouter({
             avgTotalCost: Prisma.Decimal;
           }
         >
-      >(Prisma.sql`
+      >(dbType === "dm8"
+        ? Prisma.sql`
         SELECT
           runs.id,
           runs.name,
@@ -147,7 +149,70 @@ export const datasetRouter = createTRPCRouter({
           runs.updated_at "updatedAt",
           COALESCE(avg_scores.scores, '{}') scores,
           COALESCE(latency_and_total_cost."avgLatency", 0) "avgLatency",
-          COALESCE(latency_and_total_cost."avgTotalCost", 0) "avgTotalCost",  
+          COALESCE(latency_and_total_cost."avgTotalCost", 0) "avgTotalCost",
+          CAST(COALESCE(run_items_count.count, 0) AS INTEGER) "countRunItems"
+        FROM
+          dataset_runs runs
+          JOIN datasets ON datasets.id = runs.dataset_id
+          LEFT JOIN (
+            SELECT
+              ri.dataset_run_id,
+              JSON_OBJECTAGG(s.name VALUE s.avg_value) AS scores
+            FROM (
+              SELECT
+                ri.dataset_run_id,
+                s.name,
+                AVG(s.value) AS avg_value
+              FROM
+                dataset_run_items ri
+                JOIN scores s
+                  ON s.trace_id = ri.trace_id
+                  AND (ri.observation_id IS NULL OR s.observation_id = ri.observation_id)
+                  AND s.project_id = ${input.projectId}
+                JOIN traces t ON t.id = s.trace_id
+              WHERE
+                t.project_id = ${input.projectId}
+                AND s.data_type != 'CATEGORICAL'
+                AND s.value IS NOT NULL
+              GROUP BY ri.dataset_run_id, s.name
+            ) s
+            GROUP BY ri.dataset_run_id
+          ) avg_scores ON avg_scores.dataset_run_id = runs.id
+          LEFT JOIN (
+            SELECT
+              ri.dataset_run_id,
+              AVG(o.latency) AS "avgLatency",
+              AVG(COALESCE(o.calculated_total_cost, 0)) AS "avgTotalCost"
+            FROM
+              dataset_run_items ri
+              JOIN observations_view o ON o.id = ri.observation_id
+            WHERE
+              o.project_id = ${input.projectId}
+            GROUP BY ri.dataset_run_id
+          ) latency_and_total_cost ON latency_and_total_cost.dataset_run_id = runs.id
+          LEFT JOIN (
+            SELECT ri.dataset_run_id, count(*) as count
+            FROM dataset_run_items ri
+            GROUP BY ri.dataset_run_id
+          ) run_items_count ON run_items_count.dataset_run_id = runs.id
+        WHERE
+          runs.dataset_id = ${input.datasetId}
+          AND datasets.project_id = ${input.projectId}
+        ORDER BY
+          runs.created_at DESC
+        OFFSET ${input.page * input.limit} ROWS FETCH NEXT ${input.limit} ROWS ONLY
+      `
+        : Prisma.sql`
+        SELECT
+          runs.id,
+          runs.name,
+          runs.description,
+          runs.metadata,
+          runs.created_at "createdAt",
+          runs.updated_at "updatedAt",
+          COALESCE(avg_scores.scores, '{}') scores,
+          COALESCE(latency_and_total_cost."avgLatency", 0) "avgLatency",
+          COALESCE(latency_and_total_cost."avgTotalCost", 0) "avgTotalCost",
           COALESCE(run_items_count.count, 0)::int "countRunItems"
         FROM
           dataset_runs runs
@@ -161,12 +226,12 @@ export const datasetRouter = createTRPCRouter({
                 AVG(s.value) AS avg_value
               FROM
                 dataset_run_items ri
-                JOIN scores s 
-                  ON s.trace_id = ri.trace_id 
+                JOIN scores s
+                  ON s.trace_id = ri.trace_id
                   AND (ri.observation_id IS NULL OR s.observation_id = ri.observation_id)
                   AND s.project_id = ${input.projectId}
                 JOIN traces t ON t.id = s.trace_id
-              WHERE 
+              WHERE
                 t.project_id = ${input.projectId}
                 AND s.data_type != 'CATEGORICAL'
                 AND s.value IS NOT NULL
@@ -181,16 +246,16 @@ export const datasetRouter = createTRPCRouter({
             FROM
               dataset_run_items ri
               JOIN observations_view o ON o.id = ri.observation_id
-            WHERE 
+            WHERE
               o.project_id = ${input.projectId}
               AND ri.dataset_run_id = runs.id
           ) latency_and_total_cost ON true
           LEFT JOIN LATERAL (
-            SELECT count(*) as count 
-            FROM dataset_run_items ri 
+            SELECT count(*) as count
+            FROM dataset_run_items ri
             WHERE ri.dataset_run_id = runs.id
           ) run_items_count ON true
-        WHERE 
+        WHERE
           runs.dataset_id = ${input.datasetId}
           AND datasets.project_id = ${input.projectId}
         ORDER BY
@@ -592,14 +657,45 @@ export const datasetRouter = createTRPCRouter({
 
       // Directly access 'traces' table and calculate duration via lateral join
       // Previously used 'traces_view' was not performant enough
-      const traceIdsSQL = Prisma.sql`ARRAY[${Prisma.join(runItems.map((ri) => ri.traceId))}]`;
-      const traces = await ctx.prisma.$queryRaw<
-        {
-          id: string;
-          duration: number;
-        }[]
-      >(
-        Prisma.sql`
+      const dbTypeLocal = getDbType();
+      const traces = dbTypeLocal === "dm8"
+        ? await ctx.prisma.$queryRaw<
+            {
+              id: string;
+              duration: number;
+            }[]
+          >(
+            Prisma.sql`
+            SELECT
+              t.id,
+              o.duration
+            FROM
+              traces t
+              LEFT JOIN (
+                SELECT
+                  o1.trace_id,
+                  CAST(DATEDIFF(SECOND, min(o1.start_time), COALESCE(max(o1.end_time), max(o1.start_time))) AS DOUBLE PRECISION) AS duration
+                FROM
+                  observations o1
+                WHERE
+                  o1.project_id = ${input.projectId}
+                  AND o1.trace_id IN (${Prisma.join(runItems.map((ri) => ri.traceId))})
+                GROUP BY
+                  o1.project_id,
+                  o1.trace_id
+              ) o ON o.trace_id = t.id
+            WHERE
+              t.project_id = ${input.projectId}
+              AND t.id IN (${Prisma.join(runItems.map((ri) => ri.traceId))})
+          `,
+          )
+        : await ctx.prisma.$queryRaw<
+            {
+              id: string;
+              duration: number;
+            }[]
+          >(
+            Prisma.sql`
             SELECT
               t.id,
               o.duration
@@ -618,9 +714,9 @@ export const datasetRouter = createTRPCRouter({
                   o1.trace_id) o ON TRUE
             WHERE
               t.project_id = ${input.projectId}
-              AND t.id = ANY(${traceIdsSQL})        
-        `,
-      );
+              AND t.id = ANY(ARRAY[${Prisma.join(runItems.map((ri) => ri.traceId))}])
+          `,
+          );
 
       const validatedTraceScores = filterAndValidateDbScoreList(traceScores);
       const validatedObservationScores =

@@ -9,11 +9,28 @@ import MessageResponse from "./interfaces/MessageResponse";
 require("dotenv").config();
 
 import logger from "./logger";
-
-import { evalJobCreator, evalJobExecutor } from "./queues/evalQueue";
-import { batchExportJobExecutor } from "./queues/batchExportQueue";
-import { repeatQueueExecutor } from "./queues/repeatQueue";
+import { getDbType } from "@langfuse/shared/src/db-adapter/factory";
+import { initializeQueues } from "./queue-factory";
 import helmet from "helmet";
+
+// BullMQ 队列（仅在 PostgreSQL 模式下使用）
+let evalJobCreator: any = null;
+let evalJobExecutor: any = null;
+let batchExportJobExecutor: any = null;
+let repeatQueueExecutor: any = null;
+
+if (getDbType() === "postgresql") {
+  // PostgreSQL 模式：导入 BullMQ 队列
+  const evalQueueModule = require("./queues/evalQueue");
+  evalJobCreator = evalQueueModule.evalJobCreator;
+  evalJobExecutor = evalQueueModule.evalJobExecutor;
+
+  const batchExportModule = require("./queues/batchExportQueue");
+  batchExportJobExecutor = batchExportModule.batchExportJobExecutor;
+
+  const repeatModule = require("./queues/repeatQueue");
+  repeatQueueExecutor = repeatModule.repeatQueueExecutor;
+}
 
 const app = express();
 
@@ -34,37 +51,51 @@ app.use(Sentry.expressErrorHandler());
 app.use(middlewares.notFound);
 app.use(middlewares.errorHandler);
 
-logger.info("Eval Job Creator started", evalJobCreator?.isRunning());
-logger.info("Eval Job Executor started", evalJobExecutor?.isRunning());
-logger.info(
-  "Batch Export Job Executor started",
-  batchExportJobExecutor?.isRunning()
-);
-logger.info("Repeat Queue Executor started", repeatQueueExecutor?.isRunning());
+// 初始化队列系统
+initializeQueues().then(() => {
+  logger.info("Queue system initialized successfully");
 
-evalJobCreator?.on("failed", (job, err) => {
-  logger.error(err, `Eval Job with id ${job?.id} failed with error ${err}`);
-});
+  if (getDbType() === "postgresql") {
+    // PostgreSQL 模式：记录 BullMQ 队列状态
+    logger.info("Eval Job Creator started", evalJobCreator?.isRunning());
+    logger.info("Eval Job Executor started", evalJobExecutor?.isRunning());
+    logger.info(
+      "Batch Export Job Executor started",
+      batchExportJobExecutor?.isRunning()
+    );
+    logger.info("Repeat Queue Executor started", repeatQueueExecutor?.isRunning());
 
-evalJobExecutor?.on("failed", (job, err) => {
-  logger.error(
-    err,
-    `Eval execution Job with id ${job?.id} failed with error ${err}`
-  );
-});
+    evalJobCreator?.on("failed", (job: any, err: any) => {
+      logger.error(err, `Eval Job with id ${job?.id} failed with error ${err}`);
+    });
 
-batchExportJobExecutor?.on("failed", (job, err) => {
-  logger.error(
-    err,
-    `Batch Export Job with id ${job?.id} failed with error ${err}`
-  );
-});
+    evalJobExecutor?.on("failed", (job: any, err: any) => {
+      logger.error(
+        err,
+        `Eval execution Job with id ${job?.id} failed with error ${err}`
+      );
+    });
 
-repeatQueueExecutor?.on("failed", (job, err) => {
-  logger.error(
-    err,
-    `Repeat Queue Job with id ${job?.id} failed with error ${err}`
-  );
+    batchExportJobExecutor?.on("failed", (job: any, err: any) => {
+      logger.error(
+        err,
+        `Batch Export Job with id ${job?.id} failed with error ${err}`
+      );
+    });
+
+    repeatQueueExecutor?.on("failed", (job: any, err: any) => {
+      logger.error(
+        err,
+        `Repeat Queue Job with id ${job?.id} failed with error ${err}`
+      );
+    });
+  } else {
+    // DM8 模式：记录数据库队列状态
+    logger.info("DM8 database queues started and running");
+  }
+}).catch((err) => {
+  logger.error(err, "Failed to initialize queue system");
+  Sentry.captureException(err);
 });
 
 export default app;

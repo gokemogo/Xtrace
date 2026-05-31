@@ -1,0 +1,187 @@
+services:
+  # PostgreSQL 数据库 (默认)
+  deeptrace-db:
+    container_name: deeptrace-db_test
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=dev
+      - POSTGRES_USER=system
+      - POSTGRES_PASSWORD=Deeptrace@2025
+    ports:
+      - "54321:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./posegres_init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U system -d dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # DM8 数据库 (达梦数据库) - 可选
+  deeptrace-db-dm8:
+    container_name: deeptrace-db-dm8
+    image: dm8:dm8_20250506_rev270902_x86_rh6_64
+    environment:
+      - PAGE_SIZE=32
+      - SYSDBA_PWD=Deeptrace2025
+      - INSTANCE_NAME=DM8
+    ports:
+      - "5236:5236"
+    volumes:
+      - dm8_data:/opt/dmdbms/data
+      - ./dm8_init.sql:/opt/dmdbms/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/opt/dmdbms/bin/disql", "SYSDBA/Deeptrace2025@localhost:5236", "-E", "SELECT 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+    profiles:
+      - dm8  # 只在指定 profile 时启动
+
+  # Redis 缓存
+  deeptrace-redis:
+    container_name: deeptrace-redis_test
+    image: redis:7.2-alpine
+    ports:
+      - "6397:6379"
+    command: redis-server --requirepass Deeptrace@2025
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # DeepTrace 应用 (使用 PostgreSQL)
+  deeptrace-app:
+    container_name: deeptrace-app
+    image: crpi-c5o2h95d1octk4m8.cn-hangzhou.personal.cr.aliyuncs.com/wcompass/deeptrace:1.1.0-arm64
+    ports:
+      - "3000:5000"  # web 前端
+      - "5001:5001"  # worker 后端
+    environment:
+      # 数据库类型配置
+      - DB_TYPE=postgresql
+
+      # PostgreSQL 数据库配置
+      - DATABASE_URL=postgresql://system:Deeptrace%402025@deeptrace-db:5432/dev
+      - DIRECT_URL=postgresql://system:Deeptrace%402025@deeptrace-db:5432/dev
+
+      # Redis 配置
+      - REDIS_HOST=deeptrace-redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=Deeptrace@2025
+
+      # Next Auth 配置
+      - NEXTAUTH_URL=http://192.168.10.148:3000
+      - NEXTAUTH_SECRET=secret
+
+      # Langfuse 配置
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+
+      # 端口配置
+      - PORT=5000
+      - WORKER_PORT=5001
+
+      # 安全配置
+      - SALT=salt
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
+
+      # 可选配置（留空）
+      - EMAIL_FROM_ADDRESS=
+      - SMTP_CONNECTION_URL=
+      - S3_ENDPOINT=
+      - S3_ACCESS_KEY_ID=
+      - S3_SECRET_ACCESS_KEY=
+      - S3_BUCKET_NAME=
+      - S3_REGION=
+    depends_on:
+      deeptrace-db:
+        condition: service_healthy
+      deeptrace-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: >
+      sh -c "
+        node worker/dist/index.js &
+        node web/server.js
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # DeepTrace 应用 (使用 DM8) - 可选
+  deeptrace-app-dm8:
+    container_name: deeptrace-app-dm8
+    image: crpi-c5o2h95d1octk4m8.cn-hangzhou.personal.cr.aliyuncs.com/wcompass/deeptrace:1.1.0-arm64
+    ports:
+      - "3000:5000"  # web 前端
+      - "5001:5001"  # worker 后端
+    environment:
+      # 数据库类型配置
+      - DB_TYPE=dm8
+
+      # DM8 数据库配置
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@deeptrace-db-dm8:5236
+      - DIRECT_URL=dm://SYSDBA:Deeptrace2025@deeptrace-db-dm8:5236
+
+      # Redis 配置
+      - REDIS_HOST=deeptrace-redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=Deeptrace@2025
+
+      # Next Auth 配置
+      - NEXTAUTH_URL=http://192.168.10.148:3000
+      - NEXTAUTH_SECRET=secret
+
+      # Langfuse 配置
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+
+      # 端口配置
+      - PORT=5000
+      - WORKER_PORT=5001
+
+      # 安全配置
+      - SALT=salt
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
+
+      # 可选配置（留空）
+      - EMAIL_FROM_ADDRESS=
+      - SMTP_CONNECTION_URL=
+      - S3_ENDPOINT=
+      - S3_ACCESS_KEY_ID=
+      - S3_SECRET_ACCESS_KEY=
+      - S3_BUCKET_NAME=
+      - S3_REGION=
+    depends_on:
+      deeptrace-db-dm8:
+        condition: service_healthy
+      deeptrace-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: >
+      sh -c "
+        node worker/dist/index.js &
+        node web/server.js
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - dm8  # 只在指定 profile 时启动
+
+volumes:
+  postgres_data:
+  dm8_data:

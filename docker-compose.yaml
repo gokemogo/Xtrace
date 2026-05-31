@@ -1,0 +1,169 @@
+# ==================================================
+# DeepTrace Docker Compose 部署配置
+# 连接外部 DM8 和 TongRDS 数据库
+# ==================================================
+
+version: "3.8"
+
+services:
+  # ==================================================
+  # DeepTrace Web 应用
+  # ==================================================
+  deeptrace-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.universal
+      args:
+        - NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=
+        - NEXT_PUBLIC_DEMO_PROJECT_ID=
+        - NEXT_PUBLIC_SIGN_UP_DISABLED=
+    container_name: deeptrace-web
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      # ============================================
+      # 数据库类型（dm8 或 postgresql）
+      # ============================================
+      - DB_TYPE=dm8
+
+      # ============================================
+      # DM8 数据库连接配置
+      # 格式: dm://用户名:密码@IP地址:端口
+      # ============================================
+      - DATABASE_URL=${DATABASE_URL}
+
+      # ============================================
+      # TongRDS (Redis) 连接配置
+      # ============================================
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_AUTH=${REDIS_AUTH}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-deeptrace:}
+      - REDIS_DEFAULT_TTL=${REDIS_DEFAULT_TTL:-60}
+
+      # ============================================
+      # 应用配置
+      # ============================================
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
+
+      # ============================================
+      # 安全配置
+      # ============================================
+      - SALT=${SALT}
+      - LANGFUSE_WORKER_PASSWORD=${LANGFUSE_WORKER_PASSWORD}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+
+      # ============================================
+      # 日志配置
+      # ============================================
+      - LOG_LEVEL=info
+      - NODE_ENV=production
+
+      # ============================================
+      # 端口配置
+      # ============================================
+      - PORT=3000
+
+    # 允许访问宿主机网络（用于连接外部数据库）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================================================
+  # DeepTrace Worker 服务
+  # ==================================================
+  deeptrace-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.universal
+    container_name: deeptrace-worker
+    command: ["node", "worker/dist/index.js"]
+    ports:
+      - "${WORKER_PORT:-3001}:3001"
+    environment:
+      # ============================================
+      # 数据库类型（dm8 或 postgresql）
+      # ============================================
+      - DB_TYPE=dm8
+
+      # ============================================
+      # DM8 数据库连接配置
+      # 格式: dm://用户名:密码@IP地址:端口
+      # ============================================
+      - DATABASE_URL=${DATABASE_URL}
+
+      # ============================================
+      # TongRDS (Redis) 连接配置
+      # ============================================
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_AUTH=${REDIS_AUTH}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-deeptrace:}
+      - REDIS_DEFAULT_TTL=${REDIS_DEFAULT_TTL:-60}
+
+      # ============================================
+      # 应用配置
+      # ============================================
+      - LANGFUSE_WORKER_PASSWORD=${LANGFUSE_WORKER_PASSWORD}
+      - NODE_ENV=production
+
+      # ============================================
+      # 端口配置
+      # ============================================
+      - PORT=3001
+
+    # 允许访问宿主机网络（用于连接外部数据库）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 依赖 Web 服务
+    depends_on:
+      deeptrace-web:
+        condition: service_healthy
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ==================================================
+# 网络配置
+# ==================================================
+networks:
+  default:
+    name: deeptrace-network
+    driver: bridge

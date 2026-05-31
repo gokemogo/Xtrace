@@ -17,7 +17,7 @@ import {
 } from "@langfuse/shared";
 import { ScoreDataType, prisma } from "@langfuse/shared/src/db";
 import { ResourceNotFoundError } from "@/src/utils/exceptions";
-import { mergeJson } from "@langfuse/shared";
+import { mergeJson, getDbType } from "@langfuse/shared";
 import {
   type Trace,
   type Observation,
@@ -56,10 +56,14 @@ export async function findModel(p: {
   existingDbObservation?: Observation;
 }): Promise<Model | null> {
   const { event, existingDbObservation } = p;
+  const dbType = getDbType();
+
   // either get the model from the existing observation
   // or match pattern on the user provided model name
   const modelCondition = event.model
-    ? Prisma.sql`AND ${event.model} ~ match_pattern`
+    ? dbType === "dm8"
+      ? Prisma.sql`AND REGEXP_LIKE(${event.model}, match_pattern)`
+      : Prisma.sql`AND ${event.model} ~ match_pattern`
     : existingDbObservation?.internalModel
       ? Prisma.sql`AND model_name = ${existingDbObservation.internalModel}`
       : undefined;
@@ -72,35 +76,63 @@ export async function findModel(p: {
     ? Prisma.sql`AND unit = ${mergedUnit}`
     : Prisma.empty;
 
-  const sql = Prisma.sql`
-    SELECT
-      id,
-      created_at AS "createdAt",
-      updated_at AS "updatedAt",
-      project_id AS "projectId",
-      model_name AS "modelName",
-      match_pattern AS "matchPattern",
-      start_date AS "startDate",
-      input_price AS "inputPrice",
-      output_price AS "outputPrice",
-      total_price AS "totalPrice",
-      unit, 
-      tokenizer_id AS "tokenizerId",
-      tokenizer_config AS "tokenizerConfig"
-    FROM
-      models
-    WHERE (project_id = ${event.projectId}
-      OR project_id IS NULL)
-    ${modelCondition}
-    ${unitCondition}
-    AND (start_date IS NULL OR start_date <= ${
-      event.startTime ? new Date(event.startTime) : new Date()
-    }::timestamp with time zone at time zone 'UTC')
-    ORDER BY
-      project_id ASC,
-      start_date DESC NULLS LAST
-    LIMIT 1
-  `;
+  const startTimeParam = event.startTime ? new Date(event.startTime) : new Date();
+
+  const sql = dbType === "dm8"
+    ? Prisma.sql`
+        SELECT
+          id,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          project_id AS "projectId",
+          model_name AS "modelName",
+          match_pattern AS "matchPattern",
+          start_date AS "startDate",
+          input_price AS "inputPrice",
+          output_price AS "outputPrice",
+          total_price AS "totalPrice",
+          unit,
+          tokenizer_id AS "tokenizerId",
+          tokenizer_config AS "tokenizerConfig"
+        FROM
+          models
+        WHERE (project_id = ${event.projectId}
+          OR project_id IS NULL)
+        ${modelCondition}
+        ${unitCondition}
+        AND (start_date IS NULL OR start_date <= CAST(${startTimeParam} AS TIMESTAMP WITH TIME ZONE))
+        ORDER BY
+          project_id ASC,
+          start_date DESC NULLS LAST
+        FETCH NEXT 1 ROWS ONLY
+      `
+    : Prisma.sql`
+        SELECT
+          id,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          project_id AS "projectId",
+          model_name AS "modelName",
+          match_pattern AS "matchPattern",
+          start_date AS "startDate",
+          input_price AS "inputPrice",
+          output_price AS "outputPrice",
+          total_price AS "totalPrice",
+          unit,
+          tokenizer_id AS "tokenizerId",
+          tokenizer_config AS "tokenizerConfig"
+        FROM
+          models
+        WHERE (project_id = ${event.projectId}
+          OR project_id IS NULL)
+        ${modelCondition}
+        ${unitCondition}
+        AND (start_date IS NULL OR start_date <= ${startTimeParam}::timestamp with time zone at time zone 'UTC')
+        ORDER BY
+          project_id ASC,
+          start_date DESC NULLS LAST
+        LIMIT 1
+      `;
 
   const foundModels = await prisma.$queryRaw<Array<Model>>(sql);
 

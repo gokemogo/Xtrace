@@ -2,6 +2,7 @@ import { env } from "@/src/env.mjs";
 import { ServerPosthog } from "@/src/features/posthog-analytics/ServerPosthog";
 import { prisma } from "@langfuse/shared/src/db";
 import { type NextApiRequest, type NextApiResponse } from "next";
+import { getDbType } from "@langfuse/shared";
 
 export default async function handler(
   req: NextApiRequest,
@@ -41,13 +42,23 @@ export default async function handler(
     const endTimeframe = new Date(Date.now());
 
     // db size
-    const dbSize = await prisma.$queryRaw<
-      Array<{
-        size_in_mb: number;
-      }>
-    >`
-      SELECT (pg_database_size('postgres') / 1024^2)::integer AS size_in_mb
-    `;
+    const dbType = getDbType();
+    const dbSize = dbType === "dm8"
+      ? await prisma.$queryRaw<
+          Array<{
+            size_in_mb: number;
+          }>
+        >`
+          SELECT CAST(SUM(bytes) / (1024 * 1024) AS INTEGER) AS size_in_mb
+          FROM DBA_SEGMENTS
+        `
+      : await prisma.$queryRaw<
+          Array<{
+            size_in_mb: number;
+          }>
+        >`
+          SELECT (pg_database_size('postgres') / 1024^2)::integer AS size_in_mb
+        `;
     if (dbSize[0])
       posthog.capture({
         event: "ingestion_metrics",
