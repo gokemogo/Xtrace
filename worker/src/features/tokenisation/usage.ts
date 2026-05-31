@@ -1,6 +1,6 @@
 import { isChatModel, isTiktokenModel } from "./types";
 import { countTokens } from "@anthropic-ai/tokenizer";
-import { Model } from "@prisma/client";
+import { Model } from "../../types/model";
 
 import {
   type TiktokenModel,
