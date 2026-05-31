@@ -9,8 +9,10 @@ import { getRedisCache, initRedisCache, generateCacheKey as generateRedisCacheKe
 // 根据 DB_TYPE 决定数据库模式
 const dbType = env.DB_TYPE || "postgresql";
 
-// 初始化 Redis/TongRDS 缓存（仅在 DM8 模式下）
-if (dbType === "dm8" && env.REDIS_HOST) {
+// 初始化 Redis/TongRDS 缓存（仅在 DM8 模式下，且不在构建阶段）
+const isBuildPhase = env.NEXT_PHASE === 'phase-production-build' || env.DOCKER_BUILD === '1';
+
+if (dbType === "dm8" && env.REDIS_HOST && !isBuildPhase) {
   try {
     initRedisCache({
       host: env.REDIS_HOST,
@@ -32,6 +34,12 @@ let dmdbPool: any = null;
 
 function getDm8Pool() {
   if (dmdbPool) return dmdbPool;
+
+  // 在构建阶段不初始化连接池
+  if (isBuildPhase) {
+    throw new Error("DM8 pool not available during build phase");
+  }
+
   // 使用 eval 防止 webpack 静态分析打包 dmdb
   const dmdb = eval("require")("dmdb");
   const connectionString = env.DATABASE_URL;
