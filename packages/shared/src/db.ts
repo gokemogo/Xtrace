@@ -1329,41 +1329,64 @@ declare global {
 // Always export Prisma types for TypeScript annotations
 export * from "@prisma/client";
 
-let prisma: PrismaClient;
-let kyselyPrisma: any;
+// 延迟初始化 prisma 实例，避免在构建阶段初始化 DM8 连接池
+let _prisma: PrismaClient | null = null;
+let _kyselyPrisma: any = null;
 
-if (dbType === "dm8") {
-  prisma = (globalThis.prisma as PrismaClient) ?? createDm8PrismaProxy();
-  kyselyPrisma = prisma;
-} else {
-  const prismaClientSingleton = () => {
-    return new PrismaClient({
-      log: env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error", "warn"],
-    });
-  };
+function getPrisma(): PrismaClient {
+  if (_prisma) return _prisma;
 
-  let kyselySingleton: ((pc: PrismaClient) => any) | null = null;
-  try {
-    const kyselyExt = require("prisma-extension-kysely").default;
-    const { Kysely, PostgresAdapter, PostgresIntrospector, PostgresQueryCompiler } = require("kysely");
-    kyselySingleton = (pc: PrismaClient) => pc.$extends(
-      kyselyExt({
-        kysely: (driver: any) => new Kysely({
-          dialect: {
-            createDriver: () => driver,
-            createAdapter: () => new PostgresAdapter(),
-            createIntrospector: (db: any) => new PostgresIntrospector(db),
-            createQueryCompiler: () => new PostgresQueryCompiler(),
-          },
-        }),
-      })
-    );
-  } catch {}
+  if (dbType === "dm8") {
+    _prisma = (globalThis.prisma as PrismaClient) ?? createDm8PrismaProxy();
+    _kyselyPrisma = _prisma;
+  } else {
+    const prismaClientSingleton = () => {
+      return new PrismaClient({
+        log: env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error", "warn"],
+      });
+    };
 
-  prisma = globalThis.prisma ?? prismaClientSingleton();
-  kyselyPrisma = globalThis.kyselyPrisma ?? (kyselySingleton ? kyselySingleton(prisma) : prisma);
+    let kyselySingleton: ((pc: PrismaClient) => any) | null = null;
+    try {
+      const kyselyExt = require("prisma-extension-kysely").default;
+      const { Kysely, PostgresAdapter, PostgresIntrospector, PostgresQueryCompiler } = require("kysely");
+      kyselySingleton = (pc: PrismaClient) => pc.$extends(
+        kyselyExt({
+          kysely: (driver: any) => new Kysely({
+            dialect: {
+              createDriver: () => driver,
+              createAdapter: () => new PostgresAdapter(),
+              createIntrospector: (db: any) => new PostgresIntrospector(db),
+              createQueryCompiler: () => new PostgresQueryCompiler(),
+            },
+          }),
+        })
+      );
+    } catch {}
+
+    _prisma = globalThis.prisma ?? prismaClientSingleton();
+    _kyselyPrisma = globalThis.kyselyPrisma ?? (kyselySingleton ? kyselySingleton(_prisma) : _prisma);
+  }
+
+  return _prisma;
 }
 
-export { prisma, kyselyPrisma };
+function getKyselyPrisma(): any {
+  if (!_prisma) getPrisma();
+  return _kyselyPrisma;
+}
+
+// 导出 getter 函数而不是直接导出变量
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_target, prop) {
+    return (getPrisma() as any)[prop];
+  }
+});
+
+export const kyselyPrisma = new Proxy({} as any, {
+  get(_target, prop) {
+    return (getKyselyPrisma() as any)[prop];
+  }
+});
 
 if (process.env.NODE_ENV !== "production") globalThis.prisma = prisma;
