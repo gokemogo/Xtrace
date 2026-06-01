@@ -51,6 +51,7 @@ function getDm8Pool() {
     poolMin: 2,
     poolMax: 10,
     poolIncrement: 1,
+    poolAlias: 'deeptrace_pool',
   });
   return dmdbPool;
 }
