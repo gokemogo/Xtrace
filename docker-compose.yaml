@@ -10,13 +10,7 @@ services:
   # DeepTrace Web 应用
   # ==================================================
   deeptrace-web:
-    build:
-      context: .
-      dockerfile: Dockerfile.universal
-      args:
-        - NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=
-        - NEXT_PUBLIC_DEMO_PROJECT_ID=
-        - NEXT_PUBLIC_SIGN_UP_DISABLED=
+    image: deeptrace:latest
     container_name: deeptrace-web
     ports:
       - "${WEB_PORT:-3000}:3000"
@@ -93,9 +87,7 @@ services:
   # DeepTrace Worker 服务
   # ==================================================
   deeptrace-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.universal
+    image: deeptrace:latest
     container_name: deeptrace-worker
     command: ["node", "worker/dist/index.js"]
     ports:
