@@ -214,9 +214,36 @@ function buildOrderClause(orderBy: any): string {
  */
 /**
  * 处理 DM8 LOB 对象，将其转换为字符串
+ * 同时处理日期字符串，将其转换为 Date 对象
  */
 function processLobValue(value: any): any {
   if (value === null || value === undefined) {
+    return value;
+  }
+
+  // 检查是否是日期字符串（DM8 返回的日期格式）
+  if (typeof value === 'string') {
+    // 匹配常见的日期格式：2024-01-01, 2024-01-01 12:00:00, 2024-01-01T12:00:00
+    const dateRegex = /^\d{4}-\d{2}-\d{2}(T|\s)\d{2}:\d{2}:\d{2}/;
+    if (dateRegex.test(value)) {
+      const date = new Date(value);
+      if (!isNaN(date.getTime())) {
+        return date;
+      }
+    }
+    // 匹配只有日期的格式：2024-01-01
+    const dateOnlyRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (dateOnlyRegex.test(value)) {
+      const date = new Date(value + 'T00:00:00');
+      if (!isNaN(date.getTime())) {
+        return date;
+      }
+    }
+    return value;
+  }
+
+  // 检查是否是 Date 对象（已经是 Date 类型）
+  if (value instanceof Date) {
     return value;
   }
 
