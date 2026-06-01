@@ -28,6 +28,7 @@ async function getPool() {
     poolMin: 2,
     poolMax: 10,
     poolIncrement: 1,
+    poolAlias: 'batch_export_pool',
   });
 }
 

@@ -27,6 +27,7 @@ async function getPool() {
     poolMin: 2,
     poolMax: 10,
     poolIncrement: 1,
+    poolAlias: 'eval_queue_pool',
   });
 }
 
