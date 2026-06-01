@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      dmdb:
+        specifier: ^1.0.49630
+        version: 1.0.49630
     devDependencies:
       '@release-it/bumper':
         specifier: ^6.0.1
