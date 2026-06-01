@@ -11,6 +11,9 @@ importers:
       dmdb:
         specifier: ^1.0.49630
         version: 1.0.49630
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.4.1
     devDependencies:
       '@release-it/bumper':
         specifier: ^6.0.1

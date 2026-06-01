@@ -81,6 +81,7 @@
   },
   "packageManager": "pnpm@9.5.0",
   "dependencies": {
-    "dmdb": "^1.0.49630"
+    "dmdb": "^1.0.49630",
+    "ioredis": "^5.4.1"
   }
 }
