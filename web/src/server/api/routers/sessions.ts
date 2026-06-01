@@ -75,15 +75,15 @@ export const sessionRouter = createTRPCRouter({
         const userIds = await ctx.prisma.$queryRaw<
           Array<{ value: string }>
         >(Prisma.sql`
-        SELECT 
-          traces.user_id AS value
-        FROM traces
-        WHERE 
-          traces.session_id IS NOT NULL
-          AND traces.user_id IS NOT NULL
-          AND traces.project_id = ${input.projectId}
+        SELECT
+          "traces"."user_id" AS value
+        FROM "traces"
+        WHERE
+          "traces"."session_id" IS NOT NULL
+          AND "traces"."user_id" IS NOT NULL
+          AND "traces"."project_id" = ${input.projectId}
         GROUP BY
-          traces.user_id
+          "traces"."user_id"
         LIMIT 1000;
       `);
 
@@ -143,8 +143,8 @@ export const sessionRouter = createTRPCRouter({
         const totalCostQuery = Prisma.sql`
         SELECT
           SUM(COALESCE(o."calculated_total_cost", 0)) AS "totalCost"
-        FROM observations_view o
-        JOIN traces t ON t.id = o.trace_id
+        FROM "observations_view" o
+        JOIN "traces" t ON t.id = o.trace_id
         WHERE
           t."session_id" = ${input.sessionId}
           AND t."project_id" = ${input.projectId}

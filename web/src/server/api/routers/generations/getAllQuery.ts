@@ -47,9 +47,9 @@ export const getAllQuery = protectedProjectProcedure
         ? Prisma.sql`
       SELECT
         count(*)
-      FROM observations_view o
-      JOIN traces t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
-      LEFT JOIN prompts p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
+      FROM "observations_view" o
+      JOIN "traces" t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
+      LEFT JOIN "prompts" p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
       LEFT JOIN (
         SELECT
           scores."trace_id",
@@ -62,7 +62,7 @@ export const getAllQuery = protectedProjectProcedure
               name,
               avg(value) avg_value
             FROM
-                scores
+                "scores"
             WHERE
                 scores."project_id" = ${input.projectId}
                 AND scores.value IS NOT NULL
@@ -81,9 +81,9 @@ export const getAllQuery = protectedProjectProcedure
         : Prisma.sql`
       SELECT
         count(*)
-      FROM observations_view o
-      JOIN traces t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
-      LEFT JOIN prompts p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
+      FROM "observations_view" o
+      JOIN "traces" t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
+      LEFT JOIN "prompts" p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
       LEFT JOIN LATERAL (
         SELECT
           jsonb_object_agg(name::text, avg_value::double precision) AS "scores_avg"
@@ -92,7 +92,7 @@ export const getAllQuery = protectedProjectProcedure
               name,
               avg(value) avg_value
             FROM
-                scores
+                "scores"
             WHERE
                 scores."project_id" = ${input.projectId}
                 AND scores."trace_id" = t.id

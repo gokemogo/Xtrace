@@ -87,7 +87,7 @@ export async function getAllGenerations({
             avg(value) avg_value,
             comment
           FROM
-            scores
+            "scores"
           WHERE
             project_id = ${input.projectId}
           GROUP BY
@@ -130,10 +130,10 @@ export async function getAllGenerations({
         o.prompt_id as "promptId",
         p.name as "promptName",
         p.version as "promptVersion"
-      FROM observations_view o
-      JOIN traces t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
+      FROM "observations_view" o
+      JOIN "traces" t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
       LEFT JOIN scores_avg AS s_avg ON s_avg.trace_id = t.id and s_avg.observation_id = o.id
-      LEFT JOIN prompts p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
+      LEFT JOIN "prompts" p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
       WHERE
         o.project_id = ${input.projectId}
         AND o.type = 'GENERATION'
@@ -157,7 +157,7 @@ export async function getAllGenerations({
             avg(value) avg_value,
             comment
           FROM
-            scores
+            "scores"
           WHERE
             project_id = ${input.projectId}
           GROUP BY
@@ -200,10 +200,10 @@ export async function getAllGenerations({
         o.prompt_id as "promptId",
         p.name as "promptName",
         p.version as "promptVersion"
-      FROM observations_view o
-      JOIN traces t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
+      FROM "observations_view" o
+      JOIN "traces" t ON t.id = o.trace_id AND t.project_id = ${input.projectId}
       LEFT JOIN scores_avg AS s_avg ON s_avg.trace_id = t.id and s_avg.observation_id = o.id
-      LEFT JOIN prompts p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
+      LEFT JOIN "prompts" p ON p.id = o.prompt_id AND p.project_id = ${input.projectId}
       WHERE
         o.project_id = ${input.projectId}
         AND o.type = 'GENERATION'

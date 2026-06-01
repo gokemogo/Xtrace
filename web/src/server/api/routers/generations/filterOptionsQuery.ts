@@ -121,8 +121,8 @@ export const filterOptionsQuery = protectedProjectProcedure
         SELECT
           t.name "traceName",
           CAST(count(*) AS INTEGER) AS count
-        FROM traces t
-        JOIN observations o ON o.trace_id = t.id
+        FROM "traces" t
+        JOIN "observations" o ON o.trace_id = t.id
         WHERE o.type = 'GENERATION'
           AND o.project_id = ${input.projectId}
           AND t.project_id = ${input.projectId}
@@ -134,8 +134,8 @@ export const filterOptionsQuery = protectedProjectProcedure
         SELECT
           t.name "traceName",
           count(*)::int AS count
-        FROM traces t
-        JOIN observations o ON o.trace_id = t.id
+        FROM "traces" t
+        JOIN "observations" o ON o.trace_id = t.id
         WHERE o.type = 'GENERATION'
           AND o.project_id = ${input.projectId}
           AND t.project_id = ${input.projectId}

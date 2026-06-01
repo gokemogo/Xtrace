@@ -42,12 +42,12 @@ export const userRouter = createTRPCRouter({
           dbType === "dm8"
             ? Prisma.sql`
       SELECT CAST(COUNT(DISTINCT t.user_id) AS BIGINT) AS "totalCount"
-      FROM traces t
+      FROM "traces" t
       WHERE t.project_id = ${input.projectId} ${filterCondition}
     `
             : Prisma.sql`
       SELECT COUNT(DISTINCT t.user_id)::bigint AS "totalCount"
-      FROM traces t
+      FROM "traces" t
       WHERE t.project_id = ${input.projectId} ${filterCondition}
     `,
         )
@@ -362,8 +362,8 @@ export const userRouter = createTRPCRouter({
           MAX(o.start_time) "lastObservation",
           CAST(COUNT(distinct o.id) AS BIGINT) "totalObservations",
           SUM(COALESCE(o.calculated_total_cost, 0)) AS "sumCalculatedTotalCost"
-        FROM traces t
-        LEFT JOIN observations_view o on o.trace_id = t.id
+        FROM "traces" t
+        LEFT JOIN "observations_view" o on o.trace_id = t.id
         WHERE t.user_id is not null
         AND t.project_id = ${input.projectId}
         AND o.project_id = ${input.projectId}
@@ -399,8 +399,8 @@ export const userRouter = createTRPCRouter({
           MAX(o.start_time) "lastObservation",
           COUNT(distinct o.id)::bigint "totalObservations",
           SUM(COALESCE(o.calculated_total_cost, 0)) AS "sumCalculatedTotalCost"
-        FROM traces t
-        LEFT JOIN observations_view o on o.trace_id = t.id
+        FROM "traces" t
+        LEFT JOIN "observations_view" o on o.trace_id = t.id
         WHERE t.user_id is not null
         AND t.project_id = ${input.projectId}
         AND o.project_id = ${input.projectId}

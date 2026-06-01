@@ -241,16 +241,16 @@ export const traceRouter = createTRPCRouter({
         // DM8 版本：使用 JSON_TABLE 替代 UNNEST
         tags = await ctx.prisma.$queryRaw(Prisma.sql`
           SELECT COUNT(*) AS "count", tag.value
-          FROM traces, JSON_TABLE(traces.tags, '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) tag
-          WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
+          FROM "traces", JSON_TABLE("traces"."tags", '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) tag
+          WHERE "traces"."project_id" = ${input.projectId} ${rawTimestampFilter}
           GROUP BY tag.value
           FETCH NEXT 1000 ROWS ONLY
         `);
       } else {
         tags = await ctx.prisma.$queryRaw(Prisma.sql`
           SELECT COUNT(*)::integer AS "count", tags.tag as value
-          FROM traces, UNNEST(traces.tags) AS tags(tag)
-          WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
+          FROM "traces", UNNEST("traces".tags) AS tags(tag)
+          WHERE "traces".project_id = ${input.projectId} ${rawTimestampFilter}
           GROUP BY tags.tag
           LIMIT 1000
         `);
@@ -602,7 +602,7 @@ function createTracesQuery(
               name,
               AVG(value) avg_value
           FROM
-              scores
+              "scores"
           GROUP BY
               trace_id, name
       ) tmp
