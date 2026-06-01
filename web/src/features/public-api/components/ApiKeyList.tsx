@@ -66,7 +66,7 @@ export function ApiKeyList(props: { projectId: string }) {
             {apiKeys.data?.map((apiKey) => (
               <TableRow key={apiKey.id} className="hover:bg-primary-foreground">
                 <TableCell className="hidden md:table-cell">
-                  {apiKey.createdAt.toLocaleDateString()}
+                  {new Date(apiKey.createdAt).toLocaleDateString()}
                 </TableCell>
                 {/* <TableCell>{apiKey.note ?? ""}</TableCell> */}
                 <TableCell className="font-mono">
