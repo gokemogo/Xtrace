@@ -48,6 +48,3 @@ python-test
 # Large files
 *.tar
 *.tar.gz
-
-# Deploy files
-deploy/
