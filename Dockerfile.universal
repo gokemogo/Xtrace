@@ -91,6 +91,9 @@ ENV DOCKER_BUILD=0
 ENV NEXT_MANUAL_SIG_HANDLE=true
 ENV DB_TYPE=dm8
 
+# 解决 Node.js 18+ 和 OpenSSL 3.0 兼容性问题
+ENV NODE_OPTIONS=--openssl-legacy-provider
+
 # 设置端口
 ENV PORT=3000
 ENV WORKER_PORT=3001
