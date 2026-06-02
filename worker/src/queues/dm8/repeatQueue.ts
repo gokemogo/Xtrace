@@ -15,20 +15,37 @@ async function getPool() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
+  // 使用唯一的池别名
+  const poolAlias = 'repeat_q_' + Math.abs(hashCode(connectionString)).toString(16);
   try {
     return dmdb.createPool({
       connectionString,
       poolMin: 2,
       poolMax: 10,
       poolIncrement: 1,
-      poolAlias: 'repeat_queue_pool',
+      poolAlias,
     });
   } catch (e: any) {
     if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
-      return dmdb.getPool('repeat_queue_pool');
+      try {
+        return dmdb.getPool(poolAlias);
+      } catch {
+        return dmdb.getPool();
+      }
     }
     throw e;
   }
+}
+
+// 简单的字符串 hash 函数
+function hashCode(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash;
 }
 
 // 创建队列实例

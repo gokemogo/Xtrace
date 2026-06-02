@@ -31,6 +31,8 @@ if (dbType === "dm8" && env.REDIS_HOST && !isBuildPhase) {
 // ==================== DM8 模式 ====================
 
 let dmdbPool: any = null;
+// 使用连接字符串的 hash 作为池别名，避免冲突
+let currentPoolAlias: string | null = null;
 
 function getDm8Pool() {
   if (dmdbPool) return dmdbPool;
@@ -46,23 +48,46 @@ function getDm8Pool() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
+
+  // 生成唯一的池别名（基于连接字符串）
+  const poolAlias = 'dp_' + Math.abs(hashCode(connectionString)).toString(16);
+  currentPoolAlias = poolAlias;
+
   try {
     dmdbPool = dmdb.createPool({
       connectionString,
       poolMin: 2,
       poolMax: 10,
       poolIncrement: 1,
+      poolAlias,
     });
   } catch (e: any) {
-    // 如果连接池别名已存在，获取已有的连接池
+    // 如果连接池别名已存在，尝试获取已存在的池
     if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
-      console.log("✅ 复用已存在的 DM8 连接池");
-      dmdbPool = dmdb.getPool();
+      console.log("✅ 复用已存在的 DM8 连接池:", poolAlias);
+      try {
+        dmdbPool = dmdb.getPool(poolAlias);
+      } catch (getErr: any) {
+        // 如果获取失败，尝试获取默认池
+        console.log("⚠️ 无法获取指定池，尝试默认池");
+        dmdbPool = dmdb.getPool();
+      }
     } else {
       throw e;
     }
   }
   return dmdbPool;
+}
+
+// 简单的字符串 hash 函数
+function hashCode(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return hash;
 }
 
 /**

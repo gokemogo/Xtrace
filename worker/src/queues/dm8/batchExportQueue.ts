@@ -23,20 +23,35 @@ async function getPool() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
+  const poolAlias = 'batch_q_' + Math.abs(hashCode(connectionString)).toString(16);
   try {
     return dmdb.createPool({
       connectionString,
       poolMin: 2,
       poolMax: 10,
       poolIncrement: 1,
-      poolAlias: 'batch_export_pool',
+      poolAlias,
     });
   } catch (e: any) {
     if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
-      return dmdb.getPool('batch_export_pool');
+      try {
+        return dmdb.getPool(poolAlias);
+      } catch {
+        return dmdb.getPool();
+      }
     }
     throw e;
   }
+}
+
+function hashCode(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash;
 }
 
 // 创建队列实例
