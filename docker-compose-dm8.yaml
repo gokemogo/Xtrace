@@ -1,27 +1,4 @@
 services:
-  # 数据库初始化服务（首次部署时执行，执行完后会自动退出）
-  deeptrace-init:
-    image: deeptrace:latest
-    container_name: deeptrace-init
-    volumes:
-      - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
-    environment:
-      - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # 等待 DM8 就绪后执行 SQL
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        echo "等待 DM8 数据库就绪..."
-        sleep 10
-        echo "执行初始化 SQL..."
-        cat /app/deploy/dm8_full_init.sql | /app/node_modules/.pnpm/dmdb@*/node_modules/dmdb/bin/dmdb -u SYSDBA -p Dm8DtUlR16LY8h0uC01zSYx -h host.docker.internal -P 5236 2>&1 || echo "SQL 执行完成（可能表已存在）"
-        echo "初始化完成"
-    # 只运行一次
-    restart: "no"
-
   deeptrace-web:
     image: deeptrace:latest
     container_name: deeptrace-web
@@ -31,22 +8,18 @@ services:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
       # ============================================
-      # 数据库配置（必须）
+      # DM8 数据库连接配置
+      # 格式: dm://用户名:密码@IP地址:端口
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:你的密码@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
-      # 如果没有 TongRDS，系统会自动使用内存缓存
-      # 如需使用，请取消注释以下配置
       # ============================================
-      # - REDIS_HOST=127.0.0.1
+      # - REDIS_HOST=host.docker.internal
       # - REDIS_PORT=6397
-      # - REDIS_AUTH=Deeptrace@2025
-      # - REDIS_DB=0
-      # - "REDIS_KEY_PREFIX=deeptrace:"
-      # - REDIS_DEFAULT_TTL=60
+      # - REDIS_AUTH=你的密码
 
       # ============================================
       # 应用配置
@@ -86,22 +59,17 @@ services:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
       # ============================================
-      # 数据库配置（必须）
+      # DM8 数据库连接配置
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:你的密码@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
-      # 如果没有 TongRDS，系统会自动使用内存缓存
-      # 如需使用，请取消注释以下配置
       # ============================================
-      # - REDIS_HOST=127.0.0.1
+      # - REDIS_HOST=host.docker.internal
       # - REDIS_PORT=6397
-      # - REDIS_AUTH=Deeptrace@2025
-      # - REDIS_DB=0
-      # - "REDIS_KEY_PREFIX=deeptrace:"
-      # - REDIS_DEFAULT_TTL=60
+      # - REDIS_AUTH=你的密码
 
       # ============================================
       # 应用配置
