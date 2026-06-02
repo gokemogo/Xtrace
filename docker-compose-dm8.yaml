@@ -2,8 +2,7 @@ services:
   deeptrace-web:
     image: deeptrace:latest
     container_name: deeptrace-web
-    ports:
-      - "3000:3000"
+    network_mode: host
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
@@ -11,7 +10,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -38,11 +37,9 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - HOSTNAME=0.0.0.0
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://0.0.0.0:3000/api/public/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/api/public/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -57,8 +54,7 @@ services:
     image: deeptrace:latest
     container_name: deeptrace-worker
     command: ["node", "worker/dist/index.js"]
-    ports:
-      - "3001:3001"
+    network_mode: host
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
@@ -66,7 +62,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -86,14 +82,12 @@ services:
       - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - NODE_ENV=production
       - PORT=3001
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     depends_on:
       deeptrace-web:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3001/api/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -103,8 +97,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-networks:
-  default:
-    name: deeptrace-network
-    driver: bridge
