@@ -2,27 +2,23 @@
 
 /**
  * DM8 数据库初始化脚本
- * 自动执行 dm8_full_init.sql 文件
+ * 使用 dmdb 驱动执行 SQL 文件
  */
 
 const dmdb = require('dmdb');
 const fs = require('fs');
-const path = require('path');
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const SQL_FILE = process.env.SQL_FILE || '/app/deploy/dm8_full_init.sql';
-
-if (!DATABASE_URL) {
-  console.error('❌ DATABASE_URL 环境变量未设置');
-  process.exit(1);
-}
+const DATABASE_URL = process.env.DATABASE_URL || 'dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@localhost:5236';
+const SQL_FILE = process.argv[2] || '/tmp/dm8_init_final.sql';
 
 async function main() {
+  console.log('⏳ 连接 DM8 数据库...');
+  console.log('📄 SQL 文件:', SQL_FILE);
+
   let pool;
   let conn;
 
   try {
-    console.log('⏳ 连接 DM8 数据库...');
     pool = await dmdb.createPool({
       connectionString: DATABASE_URL,
       poolMin: 1,
@@ -33,12 +29,11 @@ async function main() {
     console.log('✅ 数据库连接成功');
 
     // 读取 SQL 文件
-    console.log(`📄 读取 SQL 文件: ${SQL_FILE}`);
     const sqlContent = fs.readFileSync(SQL_FILE, 'utf8');
 
-    // 分割 SQL 语句（按分号分割，但忽略注释中的分号）
+    // 分割 SQL 语句（按分号分割）
     const statements = sqlContent
-      .split(/;\s*$/m)
+      .split(/;\s*\n/m)
       .map(s => s.trim())
       .filter(s => s.length > 0 && !s.startsWith('--'));
 
@@ -50,14 +45,10 @@ async function main() {
 
     for (let i = 0; i < statements.length; i++) {
       const sql = statements[i];
-      // 跳过纯注释
-      if (sql.match(/^--[\s\S]*$/) && !sql.match(/CREATE|ALTER|INSERT|UPDATE|DELETE/i)) {
-        continue;
-      }
-
       try {
         await conn.execute(sql);
         successCount++;
+        console.log(`✅ ${i + 1}/${statements.length}: 执行成功`);
       } catch (err) {
         if (err.message.includes('already exists') ||
             err.message.includes('重复') ||
@@ -65,12 +56,10 @@ async function main() {
             err.message.includes('[-2140]') ||
             err.message.includes('[-3236]')) {
           skipCount++;
+          console.log(`⏭️  ${i + 1}/${statements.length}: 已存在，跳过`);
         } else {
           errorCount++;
-          // 只打印非重复错误
-          if (!err.message.includes('已存在')) {
-            console.warn(`⚠️ SQL ${i + 1} 执行警告: ${err.message.substring(0, 100)}`);
-          }
+          console.error(`❌ ${i + 1}/${statements.length}: ${err.message.substring(0, 100)}`);
         }
       }
     }
