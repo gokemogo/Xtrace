@@ -11,7 +11,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -66,7 +66,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
