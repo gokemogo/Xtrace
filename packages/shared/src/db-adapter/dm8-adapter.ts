@@ -526,12 +526,21 @@ export class Dm8Adapter implements IDatabaseAdapter {
     }
 
     // 创建连接池
-    this.pool = new dmdb.createPool({
-      connectionString,
-      poolMin: 2,
-      poolMax: 10,
-      poolIncrement: 1,
-    });
+    try {
+      this.pool = dmdb.createPool({
+        connectionString,
+        poolMin: 2,
+        poolMax: 10,
+        poolIncrement: 1,
+      });
+    } catch (e: any) {
+      // 如果连接池别名已存在，获取已有的连接池
+      if (e.message && e.message.includes('20006')) {
+        this.pool = dmdb.getPool();
+      } else {
+        throw e;
+      }
+    }
 
     // 初始化所有 model 适配器
     this.account = new Dm8ModelAdapter(this.pool, "Account");

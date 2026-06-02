@@ -46,13 +46,22 @@ function getDm8Pool() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
-  dmdbPool = dmdb.createPool({
-    connectionString,
-    poolMin: 2,
-    poolMax: 10,
-    poolIncrement: 1,
-    poolAlias: 'deeptrace_pool',
-  });
+  try {
+    dmdbPool = dmdb.createPool({
+      connectionString,
+      poolMin: 2,
+      poolMax: 10,
+      poolIncrement: 1,
+    });
+  } catch (e: any) {
+    // 如果连接池别名已存在，获取已有的连接池
+    if (e.message && e.message.includes('20006')) {
+      console.log("✅ 复用已存在的 DM8 连接池");
+      dmdbPool = dmdb.getPool();
+    } else {
+      throw e;
+    }
+  }
   return dmdbPool;
 }
 

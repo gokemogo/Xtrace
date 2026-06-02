@@ -15,13 +15,20 @@ async function getPool() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
-  return dmdb.createPool({
-    connectionString,
-    poolMin: 2,
-    poolMax: 10,
-    poolIncrement: 1,
-    poolAlias: 'repeat_queue_pool',
-  });
+  try {
+    return dmdb.createPool({
+      connectionString,
+      poolMin: 2,
+      poolMax: 10,
+      poolIncrement: 1,
+      poolAlias: 'repeat_queue_pool',
+    });
+  } catch (e: any) {
+    if (e.message && e.message.includes('20006')) {
+      return dmdb.getPool('repeat_queue_pool');
+    }
+    throw e;
+  }
 }
 
 // 创建队列实例
