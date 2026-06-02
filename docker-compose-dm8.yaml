@@ -7,14 +7,27 @@ services:
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
+      # ============================================
+      # 数据库配置（必须）
+      # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PORT=6397
-      - REDIS_AUTH=Deeptrace@2025
-      - REDIS_DB=0
-      - "REDIS_KEY_PREFIX=deeptrace:"
-      - REDIS_DEFAULT_TTL=60
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+
+      # ============================================
+      # TongRDS/Redis 配置（可选）
+      # 如果没有 TongRDS，系统会自动使用内存缓存
+      # 如需使用，请取消注释以下配置
+      # ============================================
+      # - REDIS_HOST=127.0.0.1
+      # - REDIS_PORT=6397
+      # - REDIS_AUTH=Deeptrace@2025
+      # - REDIS_DB=0
+      # - "REDIS_KEY_PREFIX=deeptrace:"
+      # - REDIS_DEFAULT_TTL=60
+
+      # ============================================
+      # 应用配置
+      # ============================================
       - NEXTAUTH_URL=http://localhost:3000
       - NEXTAUTH_SECRET=secret
       - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
@@ -49,14 +62,27 @@ services:
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
+      # ============================================
+      # 数据库配置（必须）
+      # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PORT=6397
-      - REDIS_AUTH=Deeptrace@2025
-      - REDIS_DB=0
-      - "REDIS_KEY_PREFIX=deeptrace:"
-      - REDIS_DEFAULT_TTL=60
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+
+      # ============================================
+      # TongRDS/Redis 配置（可选）
+      # 如果没有 TongRDS，系统会自动使用内存缓存
+      # 如需使用，请取消注释以下配置
+      # ============================================
+      # - REDIS_HOST=127.0.0.1
+      # - REDIS_PORT=6397
+      # - REDIS_AUTH=Deeptrace@2025
+      # - REDIS_DB=0
+      # - "REDIS_KEY_PREFIX=deeptrace:"
+      # - REDIS_DEFAULT_TTL=60
+
+      # ============================================
+      # 应用配置
+      # ============================================
       - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - NODE_ENV=production
       - PORT=3001
