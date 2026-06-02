@@ -13,10 +13,10 @@ services:
     image: deeptrace:latest
     container_name: deeptrace-web
     ports:
-      - "${WEB_PORT:-3000}:3000"
+      - "3000:3000"
     environment:
       # ============================================
-      # 数据库类型（dm8 或 postgresql）
+      # 数据库类型
       # ============================================
       - DB_TYPE=dm8
 
@@ -24,31 +24,31 @@ services:
       # DM8 数据库连接配置
       # 格式: dm://用户名:密码@IP地址:端口
       # ============================================
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
 
       # ============================================
       # TongRDS (Redis) 连接配置
       # ============================================
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_AUTH=${REDIS_AUTH}
-      - REDIS_DB=${REDIS_DB:-0}
-      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-deeptrace:}
-      - REDIS_DEFAULT_TTL=${REDIS_DEFAULT_TTL:-60}
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6397
+      - REDIS_AUTH=Deeptrace@2025
+      - REDIS_DB=0
+      - REDIS_KEY_PREFIX=deeptrace:
+      - REDIS_DEFAULT_TTL=60
 
       # ============================================
       # 应用配置
       # ============================================
-      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
-      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
-      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=secret
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
 
       # ============================================
       # 安全配置
       # ============================================
-      - SALT=${SALT}
-      - LANGFUSE_WORKER_PASSWORD=${LANGFUSE_WORKER_PASSWORD}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SALT=salt
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
+      - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
 
       # ============================================
       # 日志配置
@@ -60,6 +60,7 @@ services:
       # 端口配置
       # ============================================
       - PORT=3000
+      - HOSTNAME=0.0.0.0
 
     # 允许访问宿主机网络（用于连接外部数据库）
     extra_hosts:
@@ -70,7 +71,7 @@ services:
 
     # 健康检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/public/health"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:3000/api/public/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -91,10 +92,10 @@ services:
     container_name: deeptrace-worker
     command: ["node", "worker/dist/index.js"]
     ports:
-      - "${WORKER_PORT:-3001}:3001"
+      - "3001:3001"
     environment:
       # ============================================
-      # 数据库类型（dm8 或 postgresql）
+      # 数据库类型
       # ============================================
       - DB_TYPE=dm8
 
@@ -102,22 +103,22 @@ services:
       # DM8 数据库连接配置
       # 格式: dm://用户名:密码@IP地址:端口
       # ============================================
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
 
       # ============================================
       # TongRDS (Redis) 连接配置
       # ============================================
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_AUTH=${REDIS_AUTH}
-      - REDIS_DB=${REDIS_DB:-0}
-      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-deeptrace:}
-      - REDIS_DEFAULT_TTL=${REDIS_DEFAULT_TTL:-60}
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6397
+      - REDIS_AUTH=Deeptrace@2025
+      - REDIS_DB=0
+      - REDIS_KEY_PREFIX=deeptrace:
+      - REDIS_DEFAULT_TTL=60
 
       # ============================================
       # 应用配置
       # ============================================
-      - LANGFUSE_WORKER_PASSWORD=${LANGFUSE_WORKER_PASSWORD}
+      - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - NODE_ENV=production
 
       # ============================================
