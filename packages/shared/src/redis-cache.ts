@@ -40,6 +40,13 @@ export class RedisCache {
       return;
     }
 
+    // 检查 host 是否有效
+    if (!options.host || options.host === 'undefined') {
+      console.warn('Redis/TongRDS host 未配置，缓存功能已禁用');
+      this.isAvailable = false;
+      return;
+    }
+
     try {
       this.client = new Redis({
         host: options.host,
