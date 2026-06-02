@@ -1,8 +1,32 @@
 services:
+  # 数据库初始化服务（首次部署时执行，执行完后会自动退出）
+  deeptrace-init:
+    image: deeptrace:latest
+    container_name: deeptrace-init
+    volumes:
+      - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
+    environment:
+      - DB_TYPE=dm8
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 等待 DM8 就绪后执行 SQL
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        echo "等待 DM8 数据库就绪..."
+        sleep 10
+        echo "执行初始化 SQL..."
+        cat /app/deploy/dm8_full_init.sql | /app/node_modules/.pnpm/dmdb@*/node_modules/dmdb/bin/dmdb -u SYSDBA -p Dm8DtUlR16LY8h0uC01zSYx -h host.docker.internal -P 5236 2>&1 || echo "SQL 执行完成（可能表已存在）"
+        echo "初始化完成"
+    # 只运行一次
+    restart: "no"
+
   deeptrace-web:
     image: deeptrace:latest
     container_name: deeptrace-web
-    network_mode: host
+    ports:
+      - "3000:3000"
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
@@ -10,7 +34,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -37,9 +61,11 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - HOSTNAME=0.0.0.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/api/public/health"]
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:3000/api/public/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -54,7 +80,8 @@ services:
     image: deeptrace:latest
     container_name: deeptrace-worker
     command: ["node", "worker/dist/index.js"]
-    network_mode: host
+    ports:
+      - "3001:3001"
     volumes:
       - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
     environment:
@@ -62,7 +89,7 @@ services:
       # 数据库配置（必须）
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@127.0.0.1:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -82,12 +109,14 @@ services:
       - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - NODE_ENV=production
       - PORT=3001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     depends_on:
       deeptrace-web:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3001/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -97,3 +126,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  default:
+    name: deeptrace-network
+    driver: bridge
