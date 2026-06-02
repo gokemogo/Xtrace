@@ -12,7 +12,7 @@ services:
       # 格式: dm://用户名:密码@IP地址:端口
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:你的密码@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
@@ -62,7 +62,7 @@ services:
       # DM8 数据库连接配置
       # ============================================
       - DB_TYPE=dm8
-      - DATABASE_URL=dm://SYSDBA:你的密码@host.docker.internal:5236/SYSDBA
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
 
       # ============================================
       # TongRDS/Redis 配置（可选）
