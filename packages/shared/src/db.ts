@@ -1365,7 +1365,8 @@ function getPrisma(): PrismaClient {
   if (_prisma) return _prisma;
 
   if (dbType === "dm8") {
-    _prisma = (globalThis.prisma as PrismaClient) ?? createDm8PrismaProxy();
+    // 避免使用 globalThis.prisma，因为它可能是 Proxy 对象本身
+    _prisma = createDm8PrismaProxy();
     _kyselyPrisma = _prisma;
   } else {
     const prismaClientSingleton = () => {
