@@ -1,5 +1,5 @@
-const dmdb = require('dmdb');
-const fs = require('fs');
+var dmdb = eval("require")('dmdb');
+var fs = require('fs');
 
 async function main() {
   const pool = await dmdb.createPool({
