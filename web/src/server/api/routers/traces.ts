@@ -88,20 +88,35 @@ export const traceRouter = createTRPCRouter({
         : Prisma.empty;
 
       const tracesQuery = createTracesQuery(
-        Prisma.sql`t.*,
-          t."user_id" AS "userId",
-          t.session_id AS "sessionId",
-          t."bookmarked" AS "bookmarked",
-          COALESCE(tm."promptTokens", 0)::bigint AS "promptTokens",
-          COALESCE(tm."completionTokens", 0)::bigint AS "completionTokens",
-          COALESCE(tm."totalTokens", 0)::bigint AS "totalTokens",
-          tl.latency AS "latency",
-          tl."observationCount" AS "observationCount",
-          COALESCE(tm."calculatedTotalCost", 0)::numeric AS "calculatedTotalCost",
-          COALESCE(tm."calculatedInputCost", 0)::numeric AS "calculatedInputCost",
-          COALESCE(tm."calculatedOutputCost", 0)::numeric AS "calculatedOutputCost",
-          tm."level" AS "level"
-          `,
+        dbType === "dm8"
+          ? Prisma.sql`t.*,
+            t."user_id" AS "userId",
+            t.session_id AS "sessionId",
+            t."bookmarked" AS "bookmarked",
+            CAST(COALESCE(tm."promptTokens", 0) AS BIGINT) AS "promptTokens",
+            CAST(COALESCE(tm."completionTokens", 0) AS BIGINT) AS "completionTokens",
+            CAST(COALESCE(tm."totalTokens", 0) AS BIGINT) AS "totalTokens",
+            tl.latency AS "latency",
+            tl."observationCount" AS "observationCount",
+            CAST(COALESCE(tm."calculatedTotalCost", 0) AS DECIMAL) AS "calculatedTotalCost",
+            CAST(COALESCE(tm."calculatedInputCost", 0) AS DECIMAL) AS "calculatedInputCost",
+            CAST(COALESCE(tm."calculatedOutputCost", 0) AS DECIMAL) AS "calculatedOutputCost",
+            tm."level" AS "level"
+            `
+          : Prisma.sql`t.*,
+            t."user_id" AS "userId",
+            t.session_id AS "sessionId",
+            t."bookmarked" AS "bookmarked",
+            COALESCE(tm."promptTokens", 0)::bigint AS "promptTokens",
+            COALESCE(tm."completionTokens", 0)::bigint AS "completionTokens",
+            COALESCE(tm."totalTokens", 0)::bigint AS "totalTokens",
+            tl.latency AS "latency",
+            tl."observationCount" AS "observationCount",
+            COALESCE(tm."calculatedTotalCost", 0)::numeric AS "calculatedTotalCost",
+            COALESCE(tm."calculatedInputCost", 0)::numeric AS "calculatedInputCost",
+            COALESCE(tm."calculatedOutputCost", 0)::numeric AS "calculatedOutputCost",
+            tm."level" AS "level"
+            `,
 
         input.projectId,
         observationTimeseriesFilter,

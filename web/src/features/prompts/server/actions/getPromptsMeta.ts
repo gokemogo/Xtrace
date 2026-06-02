@@ -3,6 +3,7 @@ import { promptsTableCols } from "@/src/server/api/definitions/promptsTable";
 import {
   tableColumnsToSqlFilterAndPrefix,
   type FilterState,
+  getDbType,
 } from "@langfuse/shared";
 import { prisma } from "@langfuse/shared/src/db";
 
@@ -12,35 +13,72 @@ export const getPromptsMeta = async (
   params: GetPromptsMetaParams,
 ): Promise<PromptsMetaResponse> => {
   const { projectId, page, limit } = params;
+  const dbType = getDbType();
 
-  const promptsMeta = (await prisma.$queryRaw`
-    SELECT
+  let promptsMeta: PromptsMeta[];
+  let totalItemsCount: BigInt;
+
+  if (dbType === "dm8") {
+    // DM8 版本：使用 JSON_ARRAYAGG 和 JSON_TABLE 替代 array_agg 和 unnest
+    promptsMeta = (await prisma.$queryRaw`
+      SELECT
         p.name AS name,
         p.tags AS tags,
-        array_agg(DISTINCT p.version) AS versions,
-        COALESCE(array_agg(DISTINCT label) FILTER (WHERE label IS NOT NULL), '{}'::text[]) AS labels --- COALESCE is necessary to return an empty array if there are no labels and remove NULLs
-    FROM
+        JSON_ARRAYAGG(DISTINCT p.version) AS versions,
+        COALESCE(
+          JSON_ARRAYAGG(DISTINCT label.value),
+          '[]'
+        ) AS labels
+      FROM
         prompts p
-    LEFT JOIN LATERAL unnest(p.labels) AS label ON true
-    WHERE 
-        p."project_id" = ${projectId} 
+      LEFT JOIN JSON_TABLE(p.labels, '$[*]' COLUMNS (value VARCHAR2(4000) PATH '$')) label ON 1=1
+      WHERE
+        p."project_id" = ${projectId}
         ${getPromptsFilterCondition(params)}
-    GROUP BY
-        p.name, p.tags --- tags are the same for all versions of a prompt
-    ORDER BY
-        p.name --- necessary for consistent pagination
-    LIMIT
-        ${limit}
-    OFFSET
-        ${limit * (page - 1)}
-  `) as PromptsMeta[];
+      GROUP BY
+        p.name, p.tags
+      ORDER BY
+        p.name
+      OFFSET ${(page - 1) * limit} ROWS FETCH NEXT ${limit} ROWS ONLY
+    `) as PromptsMeta[];
 
-  const [{ count: totalItemsCount }] = (await prisma.$queryRaw`
-    SELECT COUNT(DISTINCT p.name) AS count
-    FROM prompts p
-    WHERE "project_id" = ${projectId} 
-    ${getPromptsFilterCondition(params)}
-  `) as { count: BigInt }[];
+    [{ count: totalItemsCount }] = (await prisma.$queryRaw`
+      SELECT COUNT(DISTINCT p.name) AS count
+      FROM prompts p
+      WHERE "project_id" = ${projectId}
+      ${getPromptsFilterCondition(params)}
+    `) as { count: BigInt }[];
+  } else {
+    // PostgreSQL 版本
+    promptsMeta = (await prisma.$queryRaw`
+      SELECT
+          p.name AS name,
+          p.tags AS tags,
+          array_agg(DISTINCT p.version) AS versions,
+          COALESCE(array_agg(DISTINCT label) FILTER (WHERE label IS NOT NULL), '{}'::text[]) AS labels --- COALESCE is necessary to return an empty array if there are no labels and remove NULLs
+      FROM
+          prompts p
+      LEFT JOIN LATERAL unnest(p.labels) AS label ON true
+      WHERE
+          p."project_id" = ${projectId}
+          ${getPromptsFilterCondition(params)}
+      GROUP BY
+          p.name, p.tags --- tags are the same for all versions of a prompt
+      ORDER BY
+          p.name --- necessary for consistent pagination
+      LIMIT
+          ${limit}
+      OFFSET
+          ${limit * (page - 1)}
+    `) as PromptsMeta[];
+
+    [{ count: totalItemsCount }] = (await prisma.$queryRaw`
+      SELECT COUNT(DISTINCT p.name) AS count
+      FROM prompts p
+      WHERE "project_id" = ${projectId}
+      ${getPromptsFilterCondition(params)}
+    `) as { count: BigInt }[];
+  }
 
   const totalItems = Number(totalItemsCount);
   const totalPages = Math.ceil(totalItems / limit);
