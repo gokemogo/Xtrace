@@ -1,0 +1,1 @@
+CREATE TABLE test1 (id INT PRIMARY KEY, name VARCHAR(50));
