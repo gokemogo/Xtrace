@@ -31,7 +31,7 @@ async function getPool() {
       poolAlias: 'eval_queue_pool',
     });
   } catch (e: any) {
-    if (e.message && e.message.includes('20006')) {
+    if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
       return dmdb.getPool('eval_queue_pool');
     }
     throw e;

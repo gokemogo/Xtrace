@@ -32,7 +32,7 @@ async function getPool() {
       poolAlias: 'batch_export_pool',
     });
   } catch (e: any) {
-    if (e.message && e.message.includes('20006')) {
+    if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
       return dmdb.getPool('batch_export_pool');
     }
     throw e;

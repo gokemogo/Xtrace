@@ -55,7 +55,7 @@ function getDm8Pool() {
     });
   } catch (e: any) {
     // 如果连接池别名已存在，获取已有的连接池
-    if (e.message && e.message.includes('20006')) {
+    if (e.errCode === 20006 || (e.message && e.message.includes('20006'))) {
       console.log("✅ 复用已存在的 DM8 连接池");
       dmdbPool = dmdb.getPool();
     } else {
