@@ -1,11 +1,30 @@
 services:
+  deeptrace-init:
+    image: deeptrace:latest
+    container_name: deeptrace-init
+    command: ["node", "scripts/run-init.js"]
+    volumes:
+      - ./deploy/dm8_init_simple.sql:/app/deploy/dm8_init_final.sql
+    environment:
+      - DB_TYPE=dm8
+      - DATABASE_URL=dm://SYSDBA:Dm8DtUlR16LY8h0uC01zSYx@host.docker.internal:5236/SYSDBA
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   deeptrace-web:
     image: deeptrace:latest
     container_name: deeptrace-web
     ports:
       - "3000:3000"
-    volumes:
-      - ./deploy/dm8_full_init.sql:/app/deploy/dm8_full_init.sql
+    depends_on:
+      deeptrace-init:
+        condition: service_completed_successfully
     environment:
       # ============================================
       # DM8 数据库连接配置
