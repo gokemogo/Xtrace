@@ -5,7 +5,9 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./deploy:/app/deploy
+      - ./deploy/dm8_init.sql:/app/deploy/dm8_init.sql
+      - ./deploy/dm8_optimization.sql:/app/deploy/dm8_optimization.sql
+      - ./deploy/dm8_seed_data.sql:/app/deploy/dm8_seed_data.sql
     environment:
       - DB_TYPE=dm8
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
@@ -47,7 +49,9 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./deploy:/app/deploy
+      - ./deploy/dm8_init.sql:/app/deploy/dm8_init.sql
+      - ./deploy/dm8_optimization.sql:/app/deploy/dm8_optimization.sql
+      - ./deploy/dm8_seed_data.sql:/app/deploy/dm8_seed_data.sql
     environment:
       - DB_TYPE=dm8
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
