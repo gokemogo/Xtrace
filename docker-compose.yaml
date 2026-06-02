@@ -1,92 +1,43 @@
-# ==================================================
-# DeepTrace Docker Compose 部署配置
-# 连接外部 DM8 和 TongRDS 数据库
-# ==================================================
-
-version: "3.8"
-
 services:
-  # ==================================================
-  # DeepTrace Web 应用
-  # ==================================================
   deeptrace-web:
     image: deeptrace:latest
     container_name: deeptrace-web
     ports:
       - "3000:3000"
     environment:
-      # ============================================
-      # 数据库类型
-      # ============================================
       - DB_TYPE=dm8
-
-      # ============================================
-      # DM8 数据库连接配置
-      # 格式: dm://用户名:密码@IP地址:端口
-      # ============================================
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
-
-      # ============================================
-      # TongRDS (Redis) 连接配置
-      # ============================================
       - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6397
       - REDIS_AUTH=Deeptrace@2025
       - REDIS_DB=0
-      - REDIS_KEY_PREFIX=deeptrace:
+      - "REDIS_KEY_PREFIX=deeptrace:"
       - REDIS_DEFAULT_TTL=60
-
-      # ============================================
-      # 应用配置
-      # ============================================
       - NEXTAUTH_URL=http://localhost:3000
       - NEXTAUTH_SECRET=secret
       - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
-
-      # ============================================
-      # 安全配置
-      # ============================================
       - SALT=salt
       - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - ENCRYPTION_KEY=8f94183ebc9cd0702323781700473ec7778adf21c7faf9a25c9c19239d936974
-
-      # ============================================
-      # 日志配置
-      # ============================================
       - LOG_LEVEL=info
       - NODE_ENV=production
-
-      # ============================================
-      # 端口配置
-      # ============================================
       - PORT=3000
       - HOSTNAME=0.0.0.0
-
-    # 允许访问宿主机网络（用于连接外部数据库）
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-    # 重启策略
     restart: unless-stopped
-
-    # 健康检查
     healthcheck:
       test: ["CMD", "curl", "-f", "http://0.0.0.0:3000/api/public/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 60s
-
-    # 日志配置
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  # ==================================================
-  # DeepTrace Worker 服务
-  # ==================================================
   deeptrace-worker:
     image: deeptrace:latest
     container_name: deeptrace-worker
@@ -94,68 +45,35 @@ services:
     ports:
       - "3001:3001"
     environment:
-      # ============================================
-      # 数据库类型
-      # ============================================
       - DB_TYPE=dm8
-
-      # ============================================
-      # DM8 数据库连接配置
-      # 格式: dm://用户名:密码@IP地址:端口
-      # ============================================
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
-
-      # ============================================
-      # TongRDS (Redis) 连接配置
-      # ============================================
       - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6397
       - REDIS_AUTH=Deeptrace@2025
       - REDIS_DB=0
-      - REDIS_KEY_PREFIX=deeptrace:
+      - "REDIS_KEY_PREFIX=deeptrace:"
       - REDIS_DEFAULT_TTL=60
-
-      # ============================================
-      # 应用配置
-      # ============================================
       - LANGFUSE_WORKER_PASSWORD=mybasicauthsecret
       - NODE_ENV=production
-
-      # ============================================
-      # 端口配置
-      # ============================================
       - PORT=3001
-
-    # 允许访问宿主机网络（用于连接外部数据库）
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-    # 重启策略
     restart: unless-stopped
-
-    # 依赖 Web 服务
     depends_on:
       deeptrace-web:
         condition: service_healthy
-
-    # 健康检查
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
-
-    # 日志配置
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-# ==================================================
-# 网络配置
-# ==================================================
 networks:
   default:
     name: deeptrace-network
