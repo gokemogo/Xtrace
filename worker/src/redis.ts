@@ -4,6 +4,12 @@ import logger from "./logger";
 
 const createRedisClient = () => {
   try {
+    // 检查 REDIS_HOST 是否有效
+    if (!env.REDIS_HOST || env.REDIS_HOST === 'undefined') {
+      logger.warn("Redis/TongRDS host 未配置，Redis 功能已禁用");
+      return null;
+    }
+
     return env.REDIS_CONNECTION_STRING
       ? new Redis(env.REDIS_CONNECTION_STRING, { maxRetriesPerRequest: null })
       : new Redis({
