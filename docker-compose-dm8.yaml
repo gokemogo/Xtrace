@@ -4,6 +4,8 @@ services:
     container_name: deeptrace-web
     ports:
       - "3000:3000"
+    volumes:
+      - ./deploy:/app/deploy
     environment:
       - DB_TYPE=dm8
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
@@ -44,6 +46,8 @@ services:
     command: ["node", "worker/dist/index.js"]
     ports:
       - "3001:3001"
+    volumes:
+      - ./deploy:/app/deploy
     environment:
       - DB_TYPE=dm8
       - DATABASE_URL=dm://SYSDBA:Deeptrace2025@host.docker.internal:5236
