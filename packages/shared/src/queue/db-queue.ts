@@ -128,7 +128,7 @@ export class DbQueue implements IJobQueue {
     const conn = await this.pool.getConnection();
     try {
       // 开始事务
-      await conn.execute('START TRANSACTION');
+      await conn.execute('BEGIN');
 
       // 查找并锁定一个待处理的任务
       const selectSql = `

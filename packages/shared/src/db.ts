@@ -1533,7 +1533,7 @@ function createDm8PrismaProxy(): PrismaClient {
       const resolvedPool = await pool;
       const conn = await resolvedPool.getConnection();
       try {
-        await conn.execute("START TRANSACTION");
+        await conn.execute("BEGIN");
         const result = await fn(proxy);
         await conn.execute("COMMIT");
         return result;

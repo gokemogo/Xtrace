@@ -618,7 +618,7 @@ export class Dm8Adapter implements IDatabaseAdapter {
   async transaction<T>(fn: (adapter: IDatabaseAdapter) => Promise<T>): Promise<T> {
     const conn = await this.pool.getConnection();
     try {
-      await conn.execute("START TRANSACTION");
+      await conn.execute("BEGIN");
 
       // 创建一个使用同一连接的适配器
       const txAdapter = new Dm8AdapterWithConnection(conn);
