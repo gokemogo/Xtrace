@@ -81,8 +81,12 @@ function getDm8Pool() {
     }
   }
 
-  // 自动初始化：检查表是否存在，不存在则执行初始化 SQL
-  autoInitDm8Schema(dmdbPool);
+  // 自动初始化：等连接池创建完成后检查表结构
+  dmdbPool.then((pool: any) => {
+    autoInitDm8Schema(pool);
+  }).catch((e: any) => {
+    console.warn("⚠️ DM8 连接池创建失败，跳过自动初始化:", e.message);
+  });
 
   return dmdbPool;
 }
