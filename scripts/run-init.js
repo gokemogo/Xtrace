@@ -3,18 +3,28 @@ var fs = require('fs');
 
 async function main() {
   const pool = await dmdb.createPool({
-    connectionString: process.env.DATABASE_URL,
+    connectString: process.env.DATABASE_URL,
     poolMin: 1,
     poolMax: 1,
   });
   const conn = await pool.getConnection();
   console.log('✅ 连接成功');
 
-  const sql = fs.readFileSync('/app/deploy/dm8_init_final.sql', 'utf8');
-  const stmts = sql
-    .split(/;\s*\n/)
-    .map(function(s) { return s.trim(); })
-    .filter(function(s) { return s.length > 0 && s.indexOf('--') !== 0; });
+  // 检查 users 表是否已存在
+  var check = await conn.execute("SELECT COUNT(*) AS cnt FROM user_tables WHERE table_name = 'USERS'");
+  var cnt = (check.rows && check.rows[0]) ? (check.rows[0].CNT || check.rows[0].cnt || 0) : 0;
+  if (cnt > 0) {
+    console.log('✅ 表已存在，跳过初始化');
+    conn.close();
+    pool.close();
+    return;
+  }
+
+  var sql = fs.readFileSync('/app/deploy/dm8_init_final.sql', 'utf8');
+
+  // 先去掉注释行，再按分号+换行分割
+  var cleanSql = sql.split('\n').filter(function(line) { return !line.trim().startsWith('--'); }).join('\n');
+  var stmts = cleanSql.split(/\s*;\s*\n/).map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
 
   console.log('共 ' + stmts.length + ' 条语句');
 
@@ -27,14 +37,13 @@ async function main() {
     try {
       await conn.execute(s);
       ok++;
-      console.log('✅ ' + (i + 1) + '/' + stmts.length);
+      if (i % 20 === 0) console.log('✅ ' + (i + 1) + '/' + stmts.length);
     } catch(e) {
-      if (e.message.indexOf('已存在') >= 0 || e.message.indexOf('[-2140]') >= 0 || e.message.indexOf('[-3236]') >= 0) {
+      if (e.message.indexOf('已存在') >= 0 || e.message.indexOf('[-2140]') >= 0 || e.message.indexOf('[-3236]') >= 0 || e.message.indexOf('[-6602]') >= 0) {
         skip++;
-        console.log('⏭️  ' + (i + 1) + '/' + stmts.length + ' 已存在');
       } else {
         fail++;
-        console.warn('❌ ' + (i + 1) + '/' + stmts.length + ': ' + e.message.substring(0, 100));
+        if (fail <= 5) console.warn('❌ ' + (i + 1) + '/' + stmts.length + ': ' + e.message.substring(0, 100));
       }
     }
   }

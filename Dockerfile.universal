@@ -140,8 +140,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/packages/config-typescript ./pack
 COPY --from=builder --chown=nextjs:nodejs /app/worker/node_modules ./worker/node_modules
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
 
-# 复制 deploy 目录
+# 复制 deploy 目录（包含初始化 SQL）
 COPY --from=builder --chown=nextjs:nodejs /app/deploy ./deploy
+
+# 复制 scripts 目录（包含初始化脚本）
+COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
 
 # 切换到非 root 用户
 USER nextjs

@@ -80,7 +80,157 @@ function getDm8Pool() {
       throw e;
     }
   }
+
+  // 自动初始化：检查表是否存在，不存在则执行初始化 SQL
+  autoInitDm8Schema(dmdbPool);
+
   return dmdbPool;
+}
+
+/**
+ * 自动初始化 DM8 数据库表结构
+ * 检查 users 表是否存在，不存在则执行初始化 SQL 文件
+ */
+function autoInitDm8Schema(pool: any) {
+  (async () => {
+    let conn;
+    try {
+      conn = await pool.getConnection();
+      // 检查 users 表是否存在
+      const result = await conn.execute(
+        `SELECT COUNT(*) AS cnt FROM user_tables WHERE table_name = 'USERS'`
+      );
+      const cnt = result.rows?.[0]?.CNT ?? result.rows?.[0]?.cnt ?? 0;
+      if (cnt > 0) {
+        console.log("✅ DM8 数据库表已存在，跳过初始化");
+        return;
+      }
+
+      console.log("⏳ DM8 数据库为空，开始自动初始化...");
+
+      // 尝试多个可能的 SQL 文件路径
+      const fs = eval("require")("fs");
+      const path = eval("require")("path");
+      const possiblePaths = [
+        path.join(process.cwd(), "deploy", "dm8_full_init.sql"),
+        path.join(process.cwd(), "deploy", "dm8_init_final.sql"),
+        "/app/deploy/dm8_full_init.sql",
+        "/app/deploy/dm8_init_final.sql",
+      ];
+
+      let sqlFile = "";
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          sqlFile = p;
+          break;
+        }
+      }
+
+      if (!sqlFile) {
+        console.warn("⚠️ 未找到 DM8 初始化 SQL 文件，跳过自动初始化");
+        return;
+      }
+
+      console.log("📄 使用 SQL 文件:", sqlFile);
+      const sql = fs.readFileSync(sqlFile, "utf8");
+
+      // 先去掉注释行，再按分号+换行分割
+      const cleanSql = sql
+        .split("\n")
+        .filter((line: string) => !line.trim().startsWith("--"))
+        .join("\n");
+      const stmts = cleanSql
+        .split(/\s*;\s*\n/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0);
+
+      console.log(`📊 共 ${stmts.length} 条 SQL 语句`);
+
+      let ok = 0, skip = 0, fail = 0;
+      for (let i = 0; i < stmts.length; i++) {
+        try {
+          await conn.execute(stmts[i]);
+          ok++;
+        } catch (e: any) {
+          if (
+            e.message.includes("已存在") ||
+            e.message.includes("[-2140]") ||
+            e.message.includes("[-3236]") ||
+            e.message.includes("[-6602]")
+          ) {
+            skip++;
+          } else {
+            fail++;
+            if (fail <= 5) {
+              console.warn(`❌ 语句 ${i + 1} 失败: ${e.message.substring(0, 100)}`);
+            }
+          }
+        }
+      }
+
+      console.log(`✅ DM8 初始化完成: 成功=${ok}, 跳过=${skip}, 失败=${fail}`);
+
+      // 创建默认管理员账号
+      try {
+        const userCheck = await conn.execute(
+          `SELECT COUNT(*) AS cnt FROM users`
+        );
+        const userCnt = userCheck.rows?.[0]?.CNT ?? userCheck.rows?.[0]?.cnt ?? 0;
+        if (userCnt === 0) {
+          // bcryptjs 可能在不同路径（pnpm store 或直接 node_modules）
+          let bcryptjs;
+          const bcryptPaths = [
+            "bcryptjs",
+            "/app/node_modules/.pnpm/bcryptjs@2.4.3/node_modules/bcryptjs",
+            "/app/node_modules/bcryptjs",
+            "../../node_modules/.pnpm/bcryptjs@2.4.3/node_modules/bcryptjs",
+          ];
+          for (const bp of bcryptPaths) {
+            try { bcryptjs = eval("require")(bp); break; } catch {}
+          }
+          if (!bcryptjs) {
+            console.warn("⚠️ bcryptjs 模块未找到，跳过创建默认管理员");
+            return;
+          }
+          const crypto = eval("require")("crypto");
+          const userId = crypto.randomUUID();
+          const projectId = crypto.randomUUID();
+          const apiKeyId = crypto.randomUUID();
+          const publicKey = "pk-lf-" + crypto.randomBytes(16).toString("hex");
+          const secretKey = "sk-lf-" + crypto.randomBytes(32).toString("hex");
+          const hashedSecret = await bcryptjs.hash(secretKey, 12);
+          const hashedPassword = await bcryptjs.hash("admin123", 12);
+
+          await conn.execute(
+            `INSERT INTO "users" ("id", "name", "email", "password", "admin", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [userId, "Admin", "admin@deeptrace.com", hashedPassword]
+          );
+          await conn.execute(
+            `INSERT INTO "projects" ("id", "name", "created_at", "updated_at") VALUES (?, 'Default Project', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [projectId]
+          );
+          await conn.execute(
+            `INSERT INTO "project_memberships" ("id", "project_id", "user_id", "role", "created_at", "updated_at") VALUES (?, ?, ?, 'ADMIN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [crypto.randomUUID(), projectId, userId]
+          );
+          await conn.execute(
+            `INSERT INTO "api_keys" ("id", "project_id", "public_key", "hashed_secret_key", "fast_hashed_secret_key", "display_secret_key", "note", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, 'Default API Key', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [apiKeyId, projectId, publicKey, hashedSecret, hashedSecret, "sk-lf-..."]
+          );
+
+          console.log("✅ 默认管理员已创建: admin@deeptrace.com / admin123");
+        }
+      } catch (e: any) {
+        console.warn("⚠️ 创建默认管理员失败:", e.message.substring(0, 100));
+      }
+    } catch (e: any) {
+      console.error("❌ DM8 自动初始化失败:", e.message);
+    } finally {
+      if (conn) {
+        try { conn.close(); } catch {}
+      }
+    }
+  })();
 }
 
 /**
