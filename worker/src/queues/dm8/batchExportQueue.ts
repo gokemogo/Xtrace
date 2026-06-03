@@ -23,15 +23,14 @@ function parseDm8Url(url: string): string {
   const lastAtIndex = withoutScheme.lastIndexOf('@');
   if (lastAtIndex === -1) return url;
   const afterAt = withoutScheme.slice(lastAtIndex + 1);
-  if (/^[\w.]+:\d+/.test(afterAt)) {
-    const beforeAt = withoutScheme.slice(0, lastAtIndex);
-    const colonIndex = beforeAt.indexOf(':');
-    if (colonIndex === -1) return url;
-    const user = beforeAt.slice(0, colonIndex);
-    const password = beforeAt.slice(colonIndex + 1);
-    return `dm://${user}:${password}@${afterAt}`;
-  }
-  return url;
+  if (!/^[\w][\w.-]*:\d+/.test(afterAt)) return url;
+  const beforeAt = withoutScheme.slice(0, lastAtIndex);
+  const colonIndex = beforeAt.indexOf(':');
+  if (colonIndex === -1) return url;
+  const user = beforeAt.slice(0, colonIndex);
+  const password = beforeAt.slice(colonIndex + 1);
+  const encodedPassword = password.replace(/@/g, '%40');
+  return `dm://${user}:${encodedPassword}@${afterAt}`;
 }
 
 // 获取数据库连接池
