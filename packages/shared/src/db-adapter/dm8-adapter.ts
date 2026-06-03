@@ -520,15 +520,35 @@ export class Dm8Adapter implements IDatabaseAdapter {
   posthogIntegration: IModelAdapter;
   batchExport: IModelAdapter;
 
+  // 解析 DM8 连接串，支持密码中包含 @ 等特殊字符
+  private static parseDm8Url(url: string): string {
+    if (!url.startsWith('dm://')) return url;
+    const withoutScheme = url.slice(5);
+    const lastAtIndex = withoutScheme.lastIndexOf('@');
+    if (lastAtIndex === -1) return url;
+    const afterAt = withoutScheme.slice(lastAtIndex + 1);
+    if (/^[\w.]+:\d+/.test(afterAt)) {
+      const beforeAt = withoutScheme.slice(0, lastAtIndex);
+      const colonIndex = beforeAt.indexOf(':');
+      if (colonIndex === -1) return url;
+      const user = beforeAt.slice(0, colonIndex);
+      const password = beforeAt.slice(colonIndex + 1);
+      return `dm://${user}:${password}@${afterAt}`;
+    }
+    return url;
+  }
+
   constructor(connectionString: string) {
     if (!dmdb) {
       throw new Error("dmdb package is not installed. Run: pnpm add dmdb");
     }
 
+    const parsedUrl = Dm8Adapter.parseDm8Url(connectionString);
+
     // 创建连接池
     try {
       this.pool = dmdb.createPool({
-        connectionString,
+        connectString: parsedUrl,
         poolMin: 2,
         poolMax: 10,
         poolIncrement: 1,

@@ -13,17 +13,35 @@ import { prisma } from "@langfuse/shared/src/db";
 import logger from "../../logger";
 import * as Sentry from "@sentry/node";
 
+// 解析 DM8 连接串，支持密码中包含 @ 等特殊字符
+function parseDm8Url(url: string): string {
+  if (!url.startsWith('dm://')) return url;
+  const withoutScheme = url.slice(5);
+  const lastAtIndex = withoutScheme.lastIndexOf('@');
+  if (lastAtIndex === -1) return url;
+  const afterAt = withoutScheme.slice(lastAtIndex + 1);
+  if (/^[\w.]+:\d+/.test(afterAt)) {
+    const beforeAt = withoutScheme.slice(0, lastAtIndex);
+    const colonIndex = beforeAt.indexOf(':');
+    if (colonIndex === -1) return url;
+    const user = beforeAt.slice(0, colonIndex);
+    const password = beforeAt.slice(colonIndex + 1);
+    return `dm://${user}:${password}@${afterAt}`;
+  }
+  return url;
+}
+
 // 获取数据库连接池
 async function getPool() {
   const dmdb = eval("require")("dmdb");
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = parseDm8Url(process.env.DATABASE_URL || '');
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for DM8 mode");
   }
   const poolAlias = 'eval_q_' + Math.abs(hashCode(connectionString)).toString(16);
   try {
     return dmdb.createPool({
-      connectionString,
+      connectString: connectionString,
       poolMin: 2,
       poolMax: 10,
       poolIncrement: 1,
